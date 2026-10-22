@@ -1,0 +1,45 @@
+name = "grokbot-weixin"
+main = "src/worker/index.ts"
+compatibility_date = "2026-10-22"
+upload_source_maps = true
+
+# Logs and traces. Sampling stays at 1 because this Worker serves one account.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+
+[observability.issues]
+enabled = true
+
+# Non-secret defaults. Set BRIDGE_PUBLIC_URL to the deployed https origin
+# before real use (edit this table or `wrangler secret put` is unnecessary for it;
+# a var is enough). Secrets are NOT listed here.
+[vars]
+ILINK_API_BASE = "https://ilinkai.weixin.qq.com"
+ILINK_CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c"
+ILINK_BOT_TYPE = "3"
+ILINK_APP_ID = "bot"
+ILINK_CHANNEL_VERSION = "0.1.0"
+ILINK_BOT_AGENT = "GrokBotWeixin/0.1.0"
+WEIXIN_PIN_FIRST_SENDER = "true"
+SEND_TYPING = "true"
+GROK_WEBHOOK_HEADER = "Authorization"
+GROK_WEBHOOK_SCHEME = "Bearer"
+LONG_POLL_TIMEOUT_MS = "35000"
+WEBHOOK_MAX_ATTEMPTS = "4"
+RATE_LIMIT_SEND_PER_MINUTE = "30"
+
+[[durable_objects.bindings]]
+name = "ACCOUNT"
+class_name = "AccountDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AccountDurableObject"]

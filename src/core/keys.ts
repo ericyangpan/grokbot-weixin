@@ -1,0 +1,15 @@
+/** Storage keys. Values are single path segments so the file adapter can reject traversal. */
+export const KEYS = {
+  session: "session",
+  cursor: "cursor",
+  dedupe: "dedupe",
+  allowlist: "allowlist",
+  contextTokens: "context_tokens",
+  typingTickets: "typing_tickets",
+  pauseUntil: "pause_until",
+  nextTimeoutMs: "next_timeout_ms",
+  login: "login",
+  rateSend: "rate_send",
+  notifyStarted: "notify_started",
+  pollFailures: "poll_failures",
+} as const;
