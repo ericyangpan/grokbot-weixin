@@ -176,6 +176,35 @@ export interface QuoteInfo {
 
 export type InboundType = "text" | MediaKind | "mixed" | "unknown";
 
+/** Descriptive media fields kept in history. URLs are omitted because they expire. */
+export interface HistoryMedia {
+  kind: MediaKind;
+  file_name: string | null;
+  transcript: string | null;
+}
+
+/** Quote summary stored with a past user turn. */
+export interface HistoryQuote {
+  title: string | null;
+  text: string | null;
+  message_id: string | null;
+  media: HistoryMedia[];
+}
+
+/**
+ * One past turn. `user` is an inbound WeChat message. `assistant` is text
+ * this bridge successfully sent, including a proactive `/send`.
+ */
+export interface HistoryTurn {
+  role: "user" | "assistant";
+  text: string;
+  type: InboundType;
+  media: HistoryMedia[];
+  quote: HistoryQuote | null;
+  at_ms: number;
+  message_id: string;
+}
+
 /**
  * Webhook body. Field names are stable so a Grok Bot routine can read them
  * without guessing. `reply` describes the bridge send API; it does not contain
@@ -193,6 +222,11 @@ export interface InboundEvent {
   media: MediaInfo[];
   /** Set when an item carries `ref_msg`. Media on it uses the same shape as `media`. */
   quote: QuoteInfo | null;
+  /**
+   * Earlier turns with this sender, oldest first. Does not include this message.
+   * Media entries have no download URL.
+   */
+  history: HistoryTurn[];
   context_token: string | null;
   chat_type: "direct";
   reply: {

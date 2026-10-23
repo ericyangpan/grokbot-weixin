@@ -209,6 +209,7 @@ function event(): import("../src/core/types.js").InboundEvent {
     text: TEXT,
     media: [],
     quote: null,
+    history: [],
     context_token: null,
     chat_type: "direct",
     reply: {

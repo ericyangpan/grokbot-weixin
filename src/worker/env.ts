@@ -30,6 +30,10 @@ export interface Env {
   MEDIA_MAX_BYTES?: string;
   MEDIA_MAX_TOTAL_BYTES?: string;
   MEDIA_TRANSCODE_VOICE?: string;
+  HISTORY_MAX_TURNS?: string;
+  HISTORY_MAX_CHARS?: string;
+  HISTORY_TTL_MS?: string;
+  HISTORY_RESET?: string;
 }
 
 /** Copy string bindings into the core env map. The Durable Object namespace is not included. */
@@ -62,6 +66,10 @@ export function workerEnvRecord(env: Env): EnvMap {
     MEDIA_MAX_BYTES: env.MEDIA_MAX_BYTES,
     MEDIA_MAX_TOTAL_BYTES: env.MEDIA_MAX_TOTAL_BYTES,
     MEDIA_TRANSCODE_VOICE: env.MEDIA_TRANSCODE_VOICE,
+    HISTORY_MAX_TURNS: env.HISTORY_MAX_TURNS,
+    HISTORY_MAX_CHARS: env.HISTORY_MAX_CHARS,
+    HISTORY_TTL_MS: env.HISTORY_TTL_MS,
+    HISTORY_RESET: env.HISTORY_RESET,
   };
 }
 

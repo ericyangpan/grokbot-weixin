@@ -4,13 +4,20 @@ import {
   DEFAULT_CDN_BASE,
   DEFAULT_ILINK_APP_ID,
   DEFAULT_LONG_POLL_MS,
+  DEFAULT_HISTORY_MAX_CHARS,
+  DEFAULT_HISTORY_MAX_TURNS,
+  DEFAULT_HISTORY_TTL_MS,
   DEFAULT_MEDIA_MAX_BYTES,
   DEFAULT_MEDIA_TOTAL_BYTES,
   DEFAULT_MEDIA_TTL_MS,
+  MAX_HISTORY_MAX_CHARS,
+  MAX_HISTORY_MAX_TURNS,
+  MAX_HISTORY_TTL_MS,
   MAX_LONG_POLL_MS,
   MAX_MEDIA_MAX_BYTES,
   MAX_MEDIA_TOTAL_BYTES,
   MAX_MEDIA_TTL_MS,
+  MIN_HISTORY_TTL_MS,
   MIN_LONG_POLL_MS,
   MIN_MEDIA_MAX_BYTES,
   MIN_MEDIA_TTL_MS,
@@ -52,6 +59,14 @@ export interface BridgeConfig {
   mediaMaxTotalBytes: number;
   /** When a SILK decoder is installed, try to store voice as WAV. */
   mediaTranscodeVoice: boolean;
+  /** Turns kept per peer. Zero disables history and drops what was stored. */
+  historyMaxTurns: number;
+  /** Character budget for stored text and media summaries. Zero disables history. */
+  historyMaxChars: number;
+  /** Forget turns older than this. */
+  historyTtlMs: number;
+  /** When true, a lone /new or /reset clears history and is not forwarded. */
+  historyReset: boolean;
 }
 
 /** Optional credentials used to seed storage when it is empty. */
@@ -107,6 +122,10 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
     mediaMaxBytes,
     mediaMaxTotalBytes,
     mediaTranscodeVoice: boolEnv(env.MEDIA_TRANSCODE_VOICE, true),
+    historyMaxTurns: intEnv(env.HISTORY_MAX_TURNS, DEFAULT_HISTORY_MAX_TURNS, 0, MAX_HISTORY_MAX_TURNS),
+    historyMaxChars: intEnv(env.HISTORY_MAX_CHARS, DEFAULT_HISTORY_MAX_CHARS, 0, MAX_HISTORY_MAX_CHARS),
+    historyTtlMs: intEnv(env.HISTORY_TTL_MS, DEFAULT_HISTORY_TTL_MS, MIN_HISTORY_TTL_MS, MAX_HISTORY_TTL_MS),
+    historyReset: boolEnv(env.HISTORY_RESET, true),
   };
 }
 

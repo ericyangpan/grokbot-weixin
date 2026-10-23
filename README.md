@@ -34,6 +34,7 @@ sequenceDiagram
 - A sender allowlist. The first WeChat account that scans the QR, or the first inbound sender when that id is absent, can be pinned. Unknown senders are logged by id and dropped.
 - `POST /send` protected by a bearer token (SHA-256 then constant-time compare) and a sliding one-minute rate limit.
 - Inbound images, voice, files, and video. The bridge downloads the iLink CDN object, decrypts it with AES-128-ECB and PKCS#7 (the same transform as openclaw-weixin), and keeps the plaintext until `MEDIA_TTL_MS`. The webhook event carries `GET /media/:id`, the mime type, and the size. That GET uses the same bearer token as `/send`.
+- A per-sender transcript of recent inbound messages and successful outbound texts, included on each webhook as `history`. A message whose whole text is `/new` or `/reset` clears that transcript and is not forwarded.
 
 Voice notes copy `voice_item.text` into `text` when the message has no typed text, and always into `media[].transcript`. The Node runner transcodes SILK to WAV when decoding succeeds. The Worker stores the raw SILK bytes (`audio/silk`) and still forwards the transcript. A quoted message is attached as `quote`.
 
@@ -85,7 +86,11 @@ Copy `.env.example` to `.env` for the Node runner. On Cloudflare, non-secrets ca
 | `MEDIA_MAX_BYTES` | `10485760` | Largest decrypted object stored (10 MiB). Clamped to 64 KiB–32 MiB. |
 | `MEDIA_MAX_TOTAL_BYTES` | `67108864` | Total decrypted bytes kept at once (64 MiB). Oldest objects are deleted first. Raised to at least `MEDIA_MAX_BYTES`, and clamped to 256 MiB. |
 | `MEDIA_TRANSCODE_VOICE` | `true` | On Node, try to store SILK voice as WAV. The Worker has no SILK decoder, so voice there stays `audio/silk`. |
-| `GROKBOT_STATE_DIR` | `~/.grokbot-weixin` | Node only. Media files go in `media/` under this directory. |
+| `HISTORY_MAX_TURNS` | `30` | Recent turns kept per sender. Clamped to 0–100. `0` disables history and deletes what was stored. |
+| `HISTORY_MAX_CHARS` | `12000` | Budget for stored text plus media summaries and quote text. Clamped to 0–48000. `0` disables history. |
+| `HISTORY_TTL_MS` | `86400000` | Drop turns older than this (24 hours). Clamped to 1 minute–30 days. |
+| `HISTORY_RESET` | `true` | When `true`, a message whose entire text is `/new` or `/reset` clears that sender's history, sends a short confirmation on WeChat, and is not forwarded. |
+| `GROKBOT_STATE_DIR` | `~/.grokbot-weixin` | Node only. Media files go in `media/` under this directory. History is one file per sender in the state directory. |
 
 Generate a bridge token with `openssl rand -base64 32`.
 
@@ -125,6 +130,17 @@ Logs are structured JSON. They include account and sender ids, message ids, HTTP
     "message_id": "122",
     "media": []
   },
+  "history": [
+    {
+      "role": "assistant",
+      "text": "what time is the dinner?",
+      "type": "text",
+      "media": [],
+      "quote": null,
+      "at_ms": 1699999000000,
+      "message_id": "120"
+    }
+  ],
   "context_token": "ctx",
   "chat_type": "direct",
   "reply": {
@@ -149,6 +165,22 @@ Logs are structured JSON. They include account and sender ids, message ids, HTTP
 `type` is `text`, `image`, `voice`, `file`, `video`, `mixed`, or `unknown`, from the sender's own items. A message that is only a quote is classified from the quote. `state` maps `message_state` 0/1/2 to `new` / `generating` / `finished`.
 
 `text` is the sender's own text. When that is empty, it is the voice transcript. When that is also empty, it is the quoted text. The transcript is always also on `media[].transcript` (and `quote.media[].transcript` for a quoted voice note), so a caption plus a voice note does not hide the transcript.
+
+`history` is the recent conversation with this sender, oldest first. It does not include the current message. Each turn:
+
+| Field | Meaning |
+| --- | --- |
+| `role` | `user` for an inbound WeChat message, `assistant` for text this bridge successfully sent. Proactive `POST /send` and `grokbot-weixin send` are `assistant` turns too. |
+| `text` | The turn's text. For a user turn this is the same `text` the webhook used at the time. |
+| `type` | `text`, `image`, `voice`, `file`, `video`, `mixed`, or `unknown`. Assistant turns are `text`. |
+| `media` | `{ "kind", "file_name", "transcript" }` for that turn's own attachments. No `url`, mime type, or size. |
+| `quote` | `null`, or `{ "title", "text", "message_id", "media" }` for a quoted message. `media` uses the same summary shape. |
+| `at_ms` | Unix milliseconds. User turns use the WeChat timestamp when it is present. |
+| `message_id` | WeChat id, or the bridge `client_id` when a send response has no id. |
+
+The list is capped by `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, and `HISTORY_TTL_MS`. Older turns are dropped first. A single turn that is still over the character budget has its `text` shortened. Turns are stored per sender in the account Durable Object, and on Node as one `0600` file per sender. The file name is a hash, so the WeChat id is not in the path. Download URLs are not stored. A failed `/send` is not recorded. The current user turn is saved before the webhook returns, so a reply sent during that run is ordered after it.
+
+A message whose entire text is `/new` or `/reset` (case-insensitive, surrounding space ignored) clears that sender's history when `HISTORY_RESET` is true. The bridge replies on WeChat with `Started a new conversation.` and does not call the webhook. That confirmation is not kept in history.
 
 `quote` is `null` when the message does not reference another message. Otherwise:
 
@@ -199,7 +231,12 @@ Paste this into the routine that receives the webhook. Store `BRIDGE_TOKEN` as a
 ```text
 You receive WeChat messages as JSON webhook events (schema grokbot-weixin.inbound.v1).
 
-Read sender.id, text, type, media, quote, and context_token. sender.name is always null.
+Read sender.id, text, type, media, quote, history, and context_token. sender.name is always null.
+history is the recent conversation with this sender, oldest first. It does not include the current message.
+Each history entry has role ("user" or "assistant"), text, type, media, quote, at_ms, and message_id.
+assistant means text this bridge already sent, including a proactive /send. user means an earlier WeChat message.
+Use history before interpreting a short reply. "OK" may be answering the previous assistant question.
+history media and history quote.media only have kind, file_name, and transcript. They have no url.
 text is the sender's own words, or the voice transcript when they sent no text, or the quoted text when both of those are empty.
 Voice transcripts are also on media[].transcript and quote.media[].transcript. Read those even when text is a caption.
 quote is a message they referenced: quote.title, quote.text, quote.message_id, and quote.media.
@@ -265,6 +302,8 @@ npx wrangler secret put BRIDGE_PUBLIC_URL
 You can also set `BRIDGE_PUBLIC_URL` under `[vars]` in `wrangler.toml` if you prefer it in git. Leave the token and the webhook key out of that file.
 
 Inbound media does not add a secret, a binding, or an R2 bucket. `wrangler.toml` stays as it is. Decrypted bytes live in the account Durable Object until `MEDIA_TTL_MS` (default 15 minutes). Optional `MEDIA_TTL_MS`, `MEDIA_MAX_BYTES`, and `MEDIA_MAX_TOTAL_BYTES` can be `[vars]` when the defaults are wrong. `BRIDGE_PUBLIC_URL` must be set or each media object is stored nowhere and `error` is `public_url_missing`.
+
+Conversation history uses that same Durable Object key-value table. It adds no secret and no binding. Optional `[vars]` are `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, `HISTORY_TTL_MS`, and `HISTORY_RESET`.
 
 Login, pick one:
 
@@ -388,6 +427,7 @@ Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie
 - Workers Free CPU is 10 ms. Waiting on `fetch` does not spend it. Duration headroom is small if anything else on the account is always on. AES decryption goes through Web Crypto. SILK decoding does not run on the Worker: a decode that overruns the CPU limit would cancel the poll. Voice on the Worker is `audio/silk` plus the transcript. Use the Node runner when the routine needs a WAV.
 - `MEDIA_MAX_BYTES` defaults to 10 MiB and cannot be set above 32 MiB. Larger files and videos come back as `error: "too_large"` with no bytes. On the Worker each stored object is about one SQLite row per 64 KB, and expiry deletes those rows. The Free plan allows 100,000 row writes per day, which covers a single user's photos and short voice notes. A long stretch of large videos can spend that budget.
 - `BRIDGE_PUBLIC_URL` has to be the internet origin. Without it, media `url` is null.
+- Conversation history is per sender and is not a model memory store. It keeps the last 30 turns, about 12,000 characters, and 24 hours, unless the `HISTORY_*` variables say otherwise. `/new` and `/reset` clear one sender. Media in history is a description; the bytes expire with `MEDIA_TTL_MS`.
 - Direct messages only, matching upstream's stated channel scope. Group messages are dropped.
 - `context_token` is required by the send API in practice. Upstream issue [openclaw-weixin#225](https://github.com/Tencent/openclaw-weixin/issues/225) reports an empirical lifetime of about 48 hours and `ret: -2` with an empty `errmsg` when the token is stale. That lifetime and the meaning of `-2` are not in `docs/protocol.md`. This bridge maps `-2` to HTTP 409 and otherwise sends the stored token. Whether `sendmessage` accepts a body with no `context_token` was not confirmed.
 - A stale session returns iLink `-14` (documented in upstream `session-guard.ts`). Polling pauses for one hour. Log in again if it continues.
@@ -410,7 +450,7 @@ npm run build
 
 `npm test` runs Vitest. `npm run build` typechecks the Node runner, typechecks the Worker, and runs `wrangler deploy --dry-run`.
 
-Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, file modes `0700` / `0600`, inbound media parsing, AES-128-ECB decryption, and `GET /media/:id`. The iLink server and the CDN are mock `fetch` handlers. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
+Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, file modes `0700` / `0600`, inbound media parsing, AES-128-ECB decryption, `GET /media/:id`, and conversation history (bounds, proactive sends, quotes, and `/reset`). The iLink server and the CDN are mock `fetch` handlers. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
 
 ## 中文说明
 
@@ -429,6 +469,8 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 7. 白名单默认钉住扫码的微信号。若要手工指定，设置 `WEIXIN_ALLOW_FROM` 或调用 `POST /admin/allowlist`。
 
 图片、文件和视频会先下载并解密，再放进 Durable Object（Node 则是 `$GROKBOT_STATE_DIR/media`）。事件里的 `media[].url` 是 `GET /media/:id`，要用同一个 `BRIDGE_TOKEN`，并在 `expires_at_ms` 之前取走。语音如果带了 `voice_item.text`，会出现在 `text` 和 `media[].transcript`。Cloudflare 上语音文件是原始 SILK（`audio/silk`）；Node 和 Docker 会尽量转成 WAV。引用消息在 `quote` 里，结构与正文附件相同。不需要新建 R2 bucket，也不用改 `wrangler.toml`。
+
+每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 

@@ -4,6 +4,7 @@ import { IlinkApiError } from "./ilink.js";
 import { logError, logInfo } from "./log.js";
 import { createClientId } from "./protocol.js";
 import { appNow } from "./app.js";
+import { rememberOutbound } from "./history.js";
 import { readAllowlist, readContextTokens, readSession } from "./state.js";
 
 export type SendTextResult =
@@ -38,6 +39,11 @@ export async function sendBridgeText(
       clientId,
     });
     logInfo("message_sent", { to: input.to, client_id: clientId });
+    await rememberOutbound(app, input.to, {
+      text: input.text,
+      messageId: response.message_id || clientId,
+      atMs: appNow(app),
+    });
     return {
       ok: true,
       clientId,

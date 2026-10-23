@@ -1,6 +1,7 @@
 import type { BridgeApp } from "./app.js";
 import { appFetch, appNow, appSleep } from "./app.js";
 import {
+  HISTORY_RESET_ACK,
   MAX_LONG_POLL_MS,
   MESSAGE_TYPE_BOT,
   MIN_LONG_POLL_MS,
@@ -8,6 +9,7 @@ import {
   STALE_TOKEN_ERRCODE,
   TYPING_TICKET_TTL_MS,
 } from "./constants.js";
+import { clearPeerHistory, isHistoryReset, rememberInbound } from "./history.js";
 import { KEYS } from "./keys.js";
 import { logError, logInfo, logWarn, publicError } from "./log.js";
 import { isForwardable, messageDedupeId, normalizeInbound } from "./normalize.js";
@@ -25,6 +27,7 @@ import {
   writeTypingTickets,
   type StoredSession,
 } from "./state.js";
+import { sendBridgeText } from "./send.js";
 import type { GetUpdatesResp, WeixinMessage } from "./types.js";
 import { postWebhook } from "./webhook.js";
 
@@ -175,6 +178,22 @@ async function handleMessage(
   const built = normalizeInbound(msg, session.accountId, app.config.bridgePublicUrl);
   const event = await resolveInboundMedia(app, built);
   if (isForwardable(event)) {
+    if (app.config.historyReset && isHistoryReset(event)) {
+      await clearPeerHistory(app, sender);
+      logInfo("history_reset", { sender });
+      const ack = await sendBridgeText(app, {
+        to: sender,
+        text: HISTORY_RESET_ACK,
+        ...(msg.context_token ? { contextToken: msg.context_token } : {}),
+      });
+      if (ack.ok) await clearPeerHistory(app, sender);
+      return {
+        seen: nextSeen,
+        ...(nextAllow !== allow ? { allow: nextAllow } : {}),
+        ...(nextTokens !== tokens ? { tokens: nextTokens } : {}),
+      };
+    }
+    event.history = await rememberInbound(app, sender, event);
     const result = await postWebhook(
       {
         url: app.config.webhookUrl,

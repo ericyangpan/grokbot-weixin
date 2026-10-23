@@ -107,6 +107,7 @@ export function normalizeInbound(msg: WeixinMessage, accountId: string, publicBa
       text,
       media,
       quote,
+      history: [],
       context_token: msg.context_token ?? null,
       chat_type: "direct",
       reply: {
@@ -123,7 +124,7 @@ export function normalizeInbound(msg: WeixinMessage, accountId: string, publicBa
           account: accountId,
         },
         notes:
-          "POST reply.body to reply.url. Put the bridge bearer token in the Authorization header (BRIDGE_TOKEN). The placeholder is not the token. GET media[].url and quote.media[].url with that same bearer token before expires_at_ms; the URL alone is not enough. Omit context_token to use the newest token stored for this sender. Send nothing when no reply is needed. Confirm the webhook key header in the Grok Bot routine panel; this bridge's outbound call is independent of that header.",
+          "POST reply.body to reply.url. Put the bridge bearer token in the Authorization header (BRIDGE_TOKEN). The placeholder is not the token. GET media[].url and quote.media[].url with that same bearer token before expires_at_ms; the URL alone is not enough. history is older turns for this sender, oldest first, and does not include this message. A message whose entire text is /new or /reset clears history and is not forwarded. Omit context_token to use the newest token stored for this sender. Send nothing when no reply is needed. Confirm the webhook key header in the Grok Bot routine panel; this bridge's outbound call is independent of that header.",
       },
     },
   };

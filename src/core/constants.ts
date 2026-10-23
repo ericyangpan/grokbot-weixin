@@ -109,3 +109,23 @@ export const MAX_INBOUND_ITEMS = 20;
 
 /** Wall clock for one CDN GET, including redirects. */
 export const CDN_DOWNLOAD_TIMEOUT_MS = 20_000;
+
+/** Recent turns kept per peer and attached to the next webhook. */
+export const DEFAULT_HISTORY_MAX_TURNS = 30;
+
+export const MAX_HISTORY_MAX_TURNS = 100;
+
+/** About 12k characters of text plus media summaries. Stay under a 100 KB SQL write. */
+export const DEFAULT_HISTORY_MAX_CHARS = 12_000;
+
+export const MAX_HISTORY_MAX_CHARS = 48_000;
+
+/** Drop turns older than this. Default is 24 hours. */
+export const DEFAULT_HISTORY_TTL_MS = 24 * 60 * 60_000;
+
+export const MIN_HISTORY_TTL_MS = 60_000;
+
+export const MAX_HISTORY_TTL_MS = 30 * 24 * 60 * 60_000;
+
+/** Reply sent on WeChat when the user clears history. Not stored in the transcript. */
+export const HISTORY_RESET_ACK = "Started a new conversation.";
