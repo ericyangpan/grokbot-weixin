@@ -243,6 +243,96 @@ describe("conversation history", () => {
     expect(key).toMatch(/^h_[0-9a-f]{40}$/);
     expect(await files.get(key)).toContain("on disk");
   });
+
+  it("returns the send id when history storage throws and does not replace the transcript", async () => {
+    const reply = "do-not-double-send";
+    for (const mode of ["get", "set"] as const) {
+      const storage = new FlakyStorage();
+      const mock = mockFetch((request) => answer(request, () => ({ ret: 0, msgs: [] })));
+      const app = makeApp(mock.fetchImpl, { allowFrom: ["owner@im.wechat"], sendTyping: false }, storage);
+      await seed(app);
+      const key = await historyStorageKey("owner@im.wechat");
+      const saved = JSON.stringify([turn("assistant", "earlier question", NOW - 1_000)]);
+      storage.map.set(key, saved);
+      storage.fail = mode;
+      const logs = await captureLogs(async () => {
+        const response = await handleBridgeRequest(sendRequest({ text: reply }), app);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: true, message_id: "m-1" });
+      });
+      expect(mock.calls.filter((call) => call.url.pathname === "/ilink/bot/sendmessage")).toHaveLength(1);
+      expect(storage.map.get(key)).toBe(saved);
+      expect(logs).toContain(mode === "get" ? "history_read_failed" : "history_write_failed");
+      expect(logs).not.toContain(reply);
+      expect(logs).not.toContain("send_failed");
+    }
+  });
+
+  it("still delivers an inbound webhook once when history storage throws", async () => {
+    const storage = new FlakyStorage();
+    const mock = mockFetch((request) => answer(request, () => ({
+      ret: 0,
+      get_updates_buf: "c1",
+      msgs: [textMessage("9", "inbound-once")],
+    })));
+    const app = makeApp(mock.fetchImpl, { allowFrom: ["owner@im.wechat"], sendTyping: false }, storage);
+    await seed(app);
+    const key = await historyStorageKey("owner@im.wechat");
+    const saved = JSON.stringify([turn("assistant", "earlier question", NOW - 1_000)]);
+    storage.map.set(key, saved);
+    storage.fail = "get";
+    const readLogs = await captureLogs(async () => {
+      await runPollStep(app);
+      await runPollStep(app);
+    });
+    const readEvents = webhooks(mock.calls);
+    expect(readEvents).toHaveLength(1);
+    expect(readEvents[0]?.text).toBe("inbound-once");
+    expect(readEvents[0]?.history).toEqual([]);
+    expect(storage.map.get(key)).toBe(saved);
+    expect(readLogs).toContain("history_read_failed");
+    expect(readLogs).not.toContain("inbound-once");
+
+    storage.fail = "set";
+    storage.map.delete(key);
+    const writeMock = mockFetch((request) => answer(request, () => ({
+      ret: 0,
+      get_updates_buf: "c2",
+      msgs: [textMessage("10", "inbound-write")],
+    })));
+    const writeApp = makeApp(writeMock.fetchImpl, { allowFrom: ["owner@im.wechat"], sendTyping: false }, storage);
+    await seed(writeApp);
+    const writeLogs = await captureLogs(async () => {
+      await runPollStep(writeApp);
+      await runPollStep(writeApp);
+    });
+    const writeEvents = webhooks(writeMock.calls);
+    expect(writeEvents).toHaveLength(1);
+    expect(writeEvents[0]?.history).toEqual([]);
+    expect(storage.map.has(key)).toBe(false);
+    expect(writeLogs).toContain("history_write_failed");
+    expect(writeLogs).not.toContain("inbound-write");
+  });
+
+  it("acks /reset once when clearing history throws", async () => {
+    const storage = new FlakyStorage();
+    const mock = mockFetch((request) => answer(request, () => ({
+      ret: 0,
+      get_updates_buf: "c-reset",
+      msgs: [textMessage("11", "/reset")],
+    })));
+    const app = makeApp(mock.fetchImpl, { allowFrom: ["owner@im.wechat"], sendTyping: false }, storage);
+    await seed(app);
+    storage.fail = "delete";
+    const logs = await captureLogs(async () => {
+      await runPollStep(app);
+      await runPollStep(app);
+    });
+    expect(webhooks(mock.calls)).toHaveLength(0);
+    expect(mock.calls.filter((call) => call.url.pathname === "/ilink/bot/sendmessage")).toHaveLength(1);
+    expect(logs).toContain("history_write_failed");
+    expect(logs).not.toContain("send_failed");
+  });
 });
 
 function turn(role: HistoryTurn["role"], text: string, atMs: number): HistoryTurn {
@@ -310,4 +400,42 @@ class SlowStorage extends MemoryStorage {
     await new Promise((resolve) => setTimeout(resolve, 15));
     await super.set(key, value);
   }
+}
+
+class FlakyStorage extends MemoryStorage {
+  fail: "none" | "get" | "set" | "delete" = "none";
+
+  override async get(key: string): Promise<string | null> {
+    if (this.fail === "get" && key.startsWith("h_")) throw new Error("history get failed");
+    return super.get(key);
+  }
+
+  override async set(key: string, value: string): Promise<void> {
+    if (this.fail === "set" && key.startsWith("h_")) throw new Error("history set failed");
+    await super.set(key, value);
+  }
+
+  override async delete(key: string): Promise<void> {
+    if (this.fail === "delete" && key.startsWith("h_")) throw new Error("history delete failed");
+    await super.delete(key);
+  }
+}
+
+async function captureLogs(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const warn = console.warn;
+  const error = console.error;
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map((item) => String(item)).join(" "));
+  };
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map((item) => String(item)).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = warn;
+    console.error = error;
+  }
+  return lines.join("\n");
 }

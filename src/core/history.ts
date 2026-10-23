@@ -43,53 +43,69 @@ export function boundHistory(turns: HistoryTurn[], now: number, limits: HistoryL
 
 /**
  * Prior turns for this peer, oldest first, then store this inbound message.
- * The returned array does not include `event`.
+ * The returned array does not include `event`. Storage errors are logged.
+ * A failed read does not overwrite the stored transcript.
  */
 export async function rememberInbound(app: BridgeApp, peerId: string, event: InboundEvent): Promise<HistoryTurn[]> {
-  return withPeerLock(peerId, async () => {
-    const limits = limitsFrom(app);
-    const now = appNow(app);
-    const prior = await readTurns(app, peerId, now, limits);
-    const visible = prior.filter((turn) => !(turn.role === "user" && turn.message_id === event.message_id));
-    const turn = turnFromEvent(event, now);
-    await writeTurns(app, peerId, [...visible, turn], now, limits).catch((err: unknown) => {
-      logWarn("history_write_failed", { error: publicError(err) });
+  try {
+    return await withPeerLock(peerId, async () => {
+      const limits = limitsFrom(app);
+      const now = appNow(app);
+      const prior = await readOrKeep(app, peerId, now, limits);
+      if (prior === null) return [];
+      const visible = prior.filter((turn) => !(turn.role === "user" && turn.message_id === event.message_id));
+      const turn = turnFromEvent(event, now);
+      await writeOrLog(app, peerId, [...visible, turn], now, limits);
+      return visible;
     });
-    return visible;
-  });
+  } catch (err) {
+    logWarn("history_read_failed", { error: publicError(err) });
+    return [];
+  }
 }
 
-/** Record one successful outbound text. Failed sends must not call this. */
+/**
+ * Record one successful outbound text. Never throws: the send already
+ * happened, and a history error must not be reported as a failed send.
+ * A failed read does not overwrite the stored transcript.
+ */
 export async function rememberOutbound(
   app: BridgeApp,
   peerId: string,
   input: { text: string; messageId: string; atMs: number },
 ): Promise<void> {
-  await withPeerLock(peerId, async () => {
-    const limits = limitsFrom(app);
-    const now = appNow(app);
-    const prior = await readTurns(app, peerId, now, limits);
-    const turn: HistoryTurn = {
-      role: "assistant",
-      text: input.text,
-      type: "text",
-      media: [],
-      quote: null,
-      at_ms: input.atMs,
-      message_id: input.messageId,
-    };
-    const withoutDuplicate = prior.filter((item) => !(item.role === "assistant" && item.message_id === input.messageId));
-    await writeTurns(app, peerId, [...withoutDuplicate, turn], now, limits).catch((err: unknown) => {
-      logWarn("history_write_failed", { error: publicError(err) });
+  try {
+    await withPeerLock(peerId, async () => {
+      const limits = limitsFrom(app);
+      const now = appNow(app);
+      const prior = await readOrKeep(app, peerId, now, limits);
+      if (prior === null) return;
+      const turn: HistoryTurn = {
+        role: "assistant",
+        text: input.text,
+        type: "text",
+        media: [],
+        quote: null,
+        at_ms: input.atMs,
+        message_id: input.messageId,
+      };
+      const withoutDuplicate = prior.filter((item) => !(item.role === "assistant" && item.message_id === input.messageId));
+      await writeOrLog(app, peerId, [...withoutDuplicate, turn], now, limits);
     });
-  });
+  } catch (err) {
+    logWarn("history_write_failed", { error: publicError(err) });
+  }
 }
 
-/** Delete the stored transcript for one peer. */
+/** Delete the stored transcript for one peer. Storage errors are logged. */
 export async function clearPeerHistory(app: BridgeApp, peerId: string): Promise<void> {
-  await withPeerLock(peerId, async () => {
-    await app.storage.delete(await historyStorageKey(peerId));
-  });
+  try {
+    await withPeerLock(peerId, async () => {
+      await app.storage.delete(await historyStorageKey(peerId));
+    });
+  } catch (err) {
+    logWarn("history_write_failed", { error: publicError(err) });
+  }
 }
 
 /** Storage key for a peer. Hashed so ids with `@` or spaces stay valid file names. */
@@ -134,6 +150,39 @@ function summarizeQuote(event: InboundEvent): HistoryQuote | null {
 
 function summarizeMedia(item: MediaInfo): HistoryMedia {
   return { kind: item.kind, file_name: item.file_name, transcript: item.transcript };
+}
+
+/**
+ * Stored turns, or null when the read itself failed. Null means the caller
+ * must not write, so a transient storage error cannot replace a good transcript.
+ */
+async function readOrKeep(
+  app: BridgeApp,
+  peerId: string,
+  now: number,
+  limits: HistoryLimits,
+): Promise<HistoryTurn[] | null> {
+  try {
+    return await readTurns(app, peerId, now, limits);
+  } catch (err) {
+    logWarn("history_read_failed", { error: publicError(err) });
+    return null;
+  }
+}
+
+/** Write turns. Logs and swallows storage errors. */
+async function writeOrLog(
+  app: BridgeApp,
+  peerId: string,
+  turns: HistoryTurn[],
+  now: number,
+  limits: HistoryLimits,
+): Promise<void> {
+  try {
+    await writeTurns(app, peerId, turns, now, limits);
+  } catch (err) {
+    logWarn("history_write_failed", { error: publicError(err) });
+  }
 }
 
 async function readTurns(app: BridgeApp, peerId: string, now: number, limits: HistoryLimits): Promise<HistoryTurn[]> {

@@ -193,7 +193,12 @@ async function handleMessage(
         ...(nextTokens !== tokens ? { tokens: nextTokens } : {}),
       };
     }
-    event.history = await rememberInbound(app, sender, event);
+    try {
+      event.history = await rememberInbound(app, sender, event);
+    } catch (err) {
+      event.history = [];
+      logWarn("history_read_failed", { sender, error: publicError(err) });
+    }
     const result = await postWebhook(
       {
         url: app.config.webhookUrl,

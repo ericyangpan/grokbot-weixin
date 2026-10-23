@@ -178,7 +178,7 @@ Logs are structured JSON. They include account and sender ids, message ids, HTTP
 | `at_ms` | Unix milliseconds. User turns use the WeChat timestamp when it is present. |
 | `message_id` | WeChat id, or the bridge `client_id` when a send response has no id. |
 
-The list is capped by `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, and `HISTORY_TTL_MS`. Older turns are dropped first. A single turn that is still over the character budget has its `text` shortened. Turns are stored per sender in the account Durable Object, and on Node as one `0600` file per sender. The file name is a hash, so the WeChat id is not in the path. Download URLs are not stored. A failed `/send` is not recorded. The current user turn is saved before the webhook returns, so a reply sent during that run is ordered after it.
+The list is capped by `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, and `HISTORY_TTL_MS`. Older turns are dropped first. A single turn that is still over the character budget has its `text` shortened. Turns are stored per sender in the account Durable Object, and on Node as one `0600` file per sender. The file name is a hash, so the WeChat id is not in the path. Download URLs are not stored. A failed `/send` is not recorded. The current user turn is saved before the webhook returns, so a reply sent during that run is ordered after it. History reads and writes are best-effort. Once iLink has accepted a message, `POST /send` still returns success, and a history error does not drop or repeat the webhook. A failed read leaves the stored transcript as it was.
 
 A message whose entire text is `/new` or `/reset` (case-insensitive, surrounding space ignored) clears that sender's history when `HISTORY_RESET` is true. The bridge replies on WeChat with `Started a new conversation.` and does not call the webhook. That confirmation is not kept in history.
 
@@ -470,7 +470,7 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 
 图片、文件和视频会先下载并解密，再放进 Durable Object（Node 则是 `$GROKBOT_STATE_DIR/media`）。事件里的 `media[].url` 是 `GET /media/:id`，要用同一个 `BRIDGE_TOKEN`，并在 `expires_at_ms` 之前取走。语音如果带了 `voice_item.text`，会出现在 `text` 和 `media[].transcript`。Cloudflare 上语音文件是原始 SILK（`audio/silk`）；Node 和 Docker 会尽量转成 WAV。引用消息在 `quote` 里，结构与正文附件相同。不需要新建 R2 bucket，也不用改 `wrangler.toml`。
 
-每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。
+每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。历史读写失败不会把已经发给微信的消息报成失败，也不会少发或多发 webhook。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 
