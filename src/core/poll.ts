@@ -11,6 +11,7 @@ import {
 import { KEYS } from "./keys.js";
 import { logError, logInfo, logWarn, publicError } from "./log.js";
 import { isForwardable, messageDedupeId, normalizeInbound } from "./normalize.js";
+import { resolveInboundMedia, sweepMedia } from "./media.js";
 import {
   readAllowlist,
   readContextTokens,
@@ -86,6 +87,7 @@ export async function runPollStep(app: BridgeApp): Promise<PollStepOutcome> {
   const failureFlag = await app.storage.get(KEYS.pollFailures);
   if (failureFlag && failureFlag !== "0") await app.storage.set(KEYS.pollFailures, "0");
   await rememberServerTimeout(app, response.longpolling_timeout_ms, timeoutMs);
+  await sweepMedia(app);
   await dispatchMessages(app, session, response.msgs ?? []);
   const nextCursor = response.get_updates_buf;
   if (nextCursor && nextCursor !== cursor) await app.storage.set(KEYS.cursor, nextCursor);
@@ -170,7 +172,8 @@ async function handleMessage(
   if (msg.context_token && tokens[sender] !== msg.context_token) {
     nextTokens = { ...tokens, [sender]: msg.context_token };
   }
-  const event = normalizeInbound(msg, session.accountId, app.config.bridgePublicUrl);
+  const built = normalizeInbound(msg, session.accountId, app.config.bridgePublicUrl);
+  const event = await resolveInboundMedia(app, built);
   if (isForwardable(event)) {
     const result = await postWebhook(
       {

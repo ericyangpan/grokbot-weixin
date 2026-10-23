@@ -4,7 +4,7 @@ export const VERSION = "0.1.0";
 /** Default iLink Bot API origin. QR login starts here unless ILINK_API_BASE overrides it. */
 export const DEFAULT_API_BASE = "https://ilinkai.weixin.qq.com";
 
-/** Default CDN origin. v1 does not download media; the value is recorded for operators. */
+/** Default CDN origin. A missing full_url is fetched from `{base}/download`. */
 export const DEFAULT_CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 /** Upstream default bot_type for get_bot_qrcode. */
@@ -72,3 +72,40 @@ export const MESSAGE_ITEM = {
   FILE: 4,
   VIDEO: 5,
 } as const;
+
+/** How long a decrypted attachment stays downloadable. */
+export const DEFAULT_MEDIA_TTL_MS = 15 * 60_000;
+
+export const MIN_MEDIA_TTL_MS = 60_000;
+
+export const MAX_MEDIA_TTL_MS = 24 * 60 * 60_000;
+
+/** Per-object cap. Ciphertext may be one AES block larger than this. */
+export const DEFAULT_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+
+export const MIN_MEDIA_MAX_BYTES = 64 * 1024;
+
+/** Stay under Worker memory and the 2 MB Durable Object blob row limit once chunked. */
+export const MAX_MEDIA_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Total decrypted bytes kept at once, across every object. */
+export const DEFAULT_MEDIA_TOTAL_BYTES = 64 * 1024 * 1024;
+
+export const MAX_MEDIA_TOTAL_BYTES = 256 * 1024 * 1024;
+
+/**
+ * SQLite Durable Object rows reject a BLOB above 2 MB, and a bound parameter
+ * must stay clear of the 100 KB SQL statement ceiling. 64 KB chunks do both.
+ */
+export const MEDIA_CHUNK_BYTES = 64 * 1024;
+
+export const AES_BLOCK_BYTES = 16;
+
+/** Attachments fetched for one inbound message, including quoted media. */
+export const MAX_MEDIA_ITEMS = 8;
+
+/** item_list entries read from one message. The rest are ignored. */
+export const MAX_INBOUND_ITEMS = 20;
+
+/** Wall clock for one CDN GET, including redirects. */
+export const CDN_DOWNLOAD_TIMEOUT_MS = 20_000;

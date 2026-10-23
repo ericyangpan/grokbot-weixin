@@ -4,8 +4,16 @@ import {
   DEFAULT_CDN_BASE,
   DEFAULT_ILINK_APP_ID,
   DEFAULT_LONG_POLL_MS,
+  DEFAULT_MEDIA_MAX_BYTES,
+  DEFAULT_MEDIA_TOTAL_BYTES,
+  DEFAULT_MEDIA_TTL_MS,
   MAX_LONG_POLL_MS,
+  MAX_MEDIA_MAX_BYTES,
+  MAX_MEDIA_TOTAL_BYTES,
+  MAX_MEDIA_TTL_MS,
   MIN_LONG_POLL_MS,
+  MIN_MEDIA_MAX_BYTES,
+  MIN_MEDIA_TTL_MS,
   VERSION,
 } from "./constants.js";
 import { buildClientVersion, sanitizeBotAgent } from "./protocol.js";
@@ -36,6 +44,14 @@ export interface BridgeConfig {
   rateLimitPerMinute: number;
   host: string;
   port: number;
+  /** How long GET /media/:id keeps working. */
+  mediaTtlMs: number;
+  /** Largest decrypted object, in bytes. */
+  mediaMaxBytes: number;
+  /** Sum of stored objects before the oldest are deleted. */
+  mediaMaxTotalBytes: number;
+  /** When a SILK decoder is installed, try to store voice as WAV. */
+  mediaTranscodeVoice: boolean;
 }
 
 /** Optional credentials used to seed storage when it is empty. */
@@ -54,6 +70,16 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
   const fallbackAgent = `GrokBotWeixin/${channelVersion}`;
   const route = env.ILINK_ROUTE_TAG?.trim();
   const schemeRaw = env.GROK_WEBHOOK_SCHEME;
+  const mediaMaxBytes = intEnv(
+    env.MEDIA_MAX_BYTES,
+    DEFAULT_MEDIA_MAX_BYTES,
+    MIN_MEDIA_MAX_BYTES,
+    MAX_MEDIA_MAX_BYTES,
+  );
+  const mediaMaxTotalBytes = Math.max(
+    mediaMaxBytes,
+    intEnv(env.MEDIA_MAX_TOTAL_BYTES, DEFAULT_MEDIA_TOTAL_BYTES, MIN_MEDIA_MAX_BYTES, MAX_MEDIA_TOTAL_BYTES),
+  );
   return {
     ilinkApiBase: stripSlash(env.ILINK_API_BASE?.trim() || DEFAULT_API_BASE),
     ilinkCdnBase: stripSlash(env.ILINK_CDN_BASE?.trim() || DEFAULT_CDN_BASE),
@@ -77,6 +103,10 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
     rateLimitPerMinute: intEnv(env.RATE_LIMIT_SEND_PER_MINUTE, 30, 1, 600),
     host: env.BRIDGE_HOST?.trim() || "127.0.0.1",
     port: intEnv(env.BRIDGE_PORT, 8787, 1, 65535),
+    mediaTtlMs: intEnv(env.MEDIA_TTL_MS, DEFAULT_MEDIA_TTL_MS, MIN_MEDIA_TTL_MS, MAX_MEDIA_TTL_MS),
+    mediaMaxBytes,
+    mediaMaxTotalBytes,
+    mediaTranscodeVoice: boolEnv(env.MEDIA_TRANSCODE_VOICE, true),
   };
 }
 

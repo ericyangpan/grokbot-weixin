@@ -6,6 +6,7 @@ import { KEYS } from "./keys.js";
 import { advanceQrLogin, beginQrLogin, type QrLoginSession } from "./login.js";
 import { renderLoginApp, renderTokenForm } from "./login-page.js";
 import { logWarn, publicError } from "./log.js";
+import { contentDisposition, loadStoredMedia } from "./media.js";
 import { persistConfirmedLogin } from "./persist.js";
 import { qrSvg } from "./qr.js";
 import { readAllowlist, readSession, localBotTokens, writeAllowlist } from "./state.js";
@@ -28,6 +29,8 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "POST" && path === "/admin/session") return adminSession(request, app);
     if (request.method === "POST" && path === "/admin/allowlist") return adminAllowlist(request, app);
     if (request.method === "POST" && path === "/send") return send(request, app);
+    const mediaId = mediaIdFromPath(path);
+    if (request.method === "GET" && mediaId) return serveMedia(app, mediaId);
     return json({ ok: false, error: "not_found" }, 404);
   } catch (err) {
     if (err instanceof HttpError) return json({ ok: false, error: err.code }, err.status);
@@ -225,6 +228,31 @@ async function send(request: Request, app: BridgeApp): Promise<Response> {
     ...(result.messageId ? { message_id: result.messageId } : {}),
     context_token_missing: result.contextTokenMissing,
   });
+}
+
+/** GET /media/:id. The caller is already authenticated. Missing and expired ids are both 404. */
+async function serveMedia(app: BridgeApp, id: string): Promise<Response> {
+  const object = await loadStoredMedia(app, id);
+  if (!object) return json({ ok: false, error: "not_found" }, 404);
+  const bytes = object.bytes;
+  const copy = new Uint8Array(bytes);
+  return new Response(copy, {
+    status: 200,
+    headers: {
+      "Content-Type": object.mimeType || "application/octet-stream",
+      "Content-Length": String(object.bytes.byteLength),
+      "Content-Disposition": contentDisposition(object.mimeType, object.fileName),
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+/** Pull a 32-hex media id out of `/media/:id`. */
+function mediaIdFromPath(path: string): string | null {
+  const match = /^\/media\/([0-9a-f]{32})$/.exec(path);
+  return match?.[1] ?? null;
 }
 
 function publicLogin(session: QrLoginSession): Record<string, unknown> {

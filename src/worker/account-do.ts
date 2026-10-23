@@ -5,6 +5,7 @@ import { handleBridgeRequest } from "../core/http.js";
 import { logError, publicError } from "../core/log.js";
 import { ensureSeeded } from "../core/persist.js";
 import { runPollStep } from "../core/poll.js";
+import { DoMediaStore, ensureMediaSchema } from "./do-media.js";
 import { DoStorage } from "./do-storage.js";
 import { workerConfig, workerSeed, type Env } from "./env.js";
 
@@ -19,6 +20,7 @@ export class AccountDurableObject extends DurableObject<Env> {
       ctx.storage.sql.exec(
         "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
       );
+      ensureMediaSchema(ctx.storage.sql);
     });
   }
 
@@ -53,6 +55,7 @@ export class AccountDurableObject extends DurableObject<Env> {
     return {
       config,
       storage: new DoStorage(this.ctx.storage.sql),
+      media: new DoMediaStore(this.ctx.storage),
       client: createIlinkClient(config),
       onLoggedIn: async () => {
         await this.ctx.storage.setAlarm(Date.now() + 200);

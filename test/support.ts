@@ -1,5 +1,6 @@
 import { createIlinkClient, type BridgeApp } from "../src/core/app.js";
 import { configFromEnv, type BridgeConfig } from "../src/core/config.js";
+import { MemoryMediaStore } from "../src/core/media-store.js";
 import type { BridgeStorage } from "../src/core/storage.js";
 
 export interface CapturedRequest {
@@ -73,6 +74,7 @@ export function makeApp(
   return {
     config,
     storage,
+    media: new MemoryMediaStore(),
     client: createIlinkClient(config, fetchImpl),
     fetchImpl,
     sleep: async () => {},

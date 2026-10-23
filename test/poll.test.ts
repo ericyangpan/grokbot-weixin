@@ -138,11 +138,18 @@ describe("poll step", () => {
     const event = JSON.parse(hook?.body ?? "{}") as {
       type: string;
       text: string;
-      media: Array<{ kind: string; transcript: string; has_cdn_reference: boolean }>;
+      media: Array<{ kind: string; transcript: string; has_cdn_reference: boolean; error: string | null; url: string | null }>;
     };
     expect(event.type).toBe("voice");
     expect(event.text).toBe("transcribed");
-    expect(event.media[0]).toMatchObject({ kind: "voice", transcript: "transcribed", has_cdn_reference: true });
+    expect(event.media[0]).toMatchObject({
+      kind: "voice",
+      transcript: "transcribed",
+      has_cdn_reference: true,
+      error: "no_key",
+      url: null,
+    });
+    expect(mock.calls.some((call) => call.url.pathname.includes("download"))).toBe(false);
     expect(mock.calls.some((call) => call.url.pathname === "/ilink/bot/getconfig")).toBe(true);
     expect(mock.calls.some((call) => call.url.pathname === "/ilink/bot/sendtyping")).toBe(true);
   });
@@ -201,6 +208,7 @@ function event(): import("../src/core/types.js").InboundEvent {
     state: "finished",
     text: TEXT,
     media: [],
+    quote: null,
     context_token: null,
     chat_type: "direct",
     reply: {

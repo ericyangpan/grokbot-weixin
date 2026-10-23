@@ -13,9 +13,11 @@ import { qrTerminal } from "../core/qr.js";
 import { sendBridgeText } from "../core/send.js";
 import { localBotTokens, readAllowlist, readSession, writeAllowlist } from "../core/state.js";
 import { loadDotEnv } from "./dotenv.js";
+import { FileMediaStore } from "./file-media.js";
 import { FileStorage } from "./file-storage.js";
 import { runPollLoop } from "./loop.js";
 import { startHttpServer } from "./server.js";
+import { decodeSilkPcm } from "./silk.js";
 
 const LOGIN_TIMEOUT_MS = 8 * 60_000;
 
@@ -24,7 +26,13 @@ async function main(): Promise<void> {
   loadDotEnv();
   const config = configFromEnv(process.env);
   const storage = new FileStorage(stateDir());
-  const app: BridgeApp = { config, storage, client: createIlinkClient(config) };
+  const app: BridgeApp = {
+    config,
+    storage,
+    media: new FileMediaStore(path.join(stateDir(), "media")),
+    client: createIlinkClient(config),
+    decodeSilk: decodeSilkPcm,
+  };
   await ensureSeeded(app, seedFromEnv(process.env));
   const [command, ...rest] = process.argv.slice(2);
   if (command === "login") await login(app, rest);

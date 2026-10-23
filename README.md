@@ -10,12 +10,16 @@ The protocol follows Tencent's official OpenClaw channel plugin, [openclaw-weixi
 sequenceDiagram
   participant WeChat
   participant iLink as iLink Bot API
+  participant CDN as iLink CDN
   participant Bridge as grokbot-weixin
   participant Routine as Grok Bot routine
   WeChat->>iLink: Owner sends a DM
   iLink->>Bridge: POST /ilink/bot/getupdates
+  Bridge->>CDN: GET encrypted media
+  Bridge->>Bridge: AES-128-ECB decrypt, store briefly
   Bridge->>Routine: POST webhook event (Bearer key)
-  Routine->>Routine: Read the event, decide a reply
+  Routine->>Bridge: GET /media/:id (BRIDGE_TOKEN)
+  Routine->>Routine: Read the event and the file
   Routine->>Bridge: POST /send (BRIDGE_TOKEN)
   Bridge->>iLink: POST /ilink/bot/sendmessage
   iLink->>WeChat: Text reply
@@ -29,8 +33,9 @@ sequenceDiagram
 - Optional typing indicator (`getconfig` + `sendtyping`) after a webhook is accepted.
 - A sender allowlist. The first WeChat account that scans the QR, or the first inbound sender when that id is absent, can be pinned. Unknown senders are logged by id and dropped.
 - `POST /send` protected by a bearer token (SHA-256 then constant-time compare) and a sliding one-minute rate limit.
+- Inbound images, voice, files, and video. The bridge downloads the iLink CDN object, decrypts it with AES-128-ECB and PKCS#7 (the same transform as openclaw-weixin), and keeps the plaintext until `MEDIA_TTL_MS`. The webhook event carries `GET /media/:id`, the mime type, and the size. That GET uses the same bearer token as `/send`.
 
-Media bytes stay on the Weixin CDN. The webhook event includes the media kind, file name, and voice transcript (`voice_item.text`) when the API sends them. Image, file, and video decryption is not implemented. The upstream CDN path uses AES-128-ECB; copying that into v1 was left out on purpose.
+Voice notes copy `voice_item.text` into `text` when the message has no typed text, and always into `media[].transcript`. The Node runner transcodes SILK to WAV when decoding succeeds. The Worker stores the raw SILK bytes (`audio/silk`) and still forwards the transcript. A quoted message is attached as `quote`.
 
 Upstream's channel metadata describes this API as direct messages only (`chatTypes: ["direct"]`, group policy disabled). Messages that carry `group_id` are ignored. Bot echoes (`message_type` 2, or `from_user_id` equal to the account id) are ignored.
 
@@ -38,9 +43,9 @@ Upstream's channel metadata describes this API as direct messages only (`chatTyp
 
 | Path | Role |
 | --- | --- |
-| `src/core` | iLink client, QR state machine, one poll step, webhook, `/send`, login page. Uses `fetch`, Web Crypto, and an injected storage interface. |
-| `src/worker` | Cloudflare Worker plus one SQLite Durable Object named `owner`. An alarm runs one poll, writes state, and reschedules. |
-| `src/node` | Node.js 22 CLI. State files live in `~/.grokbot-weixin/` (directory `0700`, files `0600`). |
+| `src/core` | iLink client, QR state machine, one poll step, webhook, `/send`, `GET /media/:id`, AES-128-ECB, login page. Uses `fetch`, Web Crypto, and injected storage. |
+| `src/worker` | Cloudflare Worker plus one SQLite Durable Object named `owner`. An alarm runs one poll, writes state, stores decrypted media in that same database, and reschedules. |
+| `src/node` | Node.js 22 CLI. State files live in `~/.grokbot-weixin/` (directory `0700`, files `0600`). Decrypted media is under `media/`. SILK voice is decoded with `silk-wasm`. |
 | `test` | Vitest against an in-memory iLink fetch mock. |
 
 Runtime dependency: [`uqr`](https://www.npmjs.com/package/uqr) for the login QR (SVG in the browser, Unicode in the terminal).
@@ -52,7 +57,7 @@ Copy `.env.example` to `.env` for the Node runner. On Cloudflare, non-secrets ca
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ILINK_API_BASE` | `https://ilinkai.weixin.qq.com` | QR login and API host until a confirm response returns `baseurl`. |
-| `ILINK_CDN_BASE` | `https://novac2c.cdn.weixin.qq.com/c2c` | Recorded for later media work. v1 does not call it. |
+| `ILINK_CDN_BASE` | `https://novac2c.cdn.weixin.qq.com/c2c` | Used when a media item has `encrypt_query_param` and no usable `full_url`. The GET is `{base}/download?encrypted_query_param=`. |
 | `ILINK_BOT_TYPE` | `3` | Query value on `get_bot_qrcode`. |
 | `ILINK_APP_ID` | `bot` | `iLink-App-Id`. |
 | `ILINK_CHANNEL_VERSION` | `0.1.0` | Encoded into `iLink-App-ClientVersion` as `major<<16 \| minor<<8 \| patch`. |
@@ -75,12 +80,16 @@ Copy `.env.example` to `.env` for the Node runner. On Cloudflare, non-secrets ca
 | `SEND_TYPING` | `true` | Send a typing indicator after a successful webhook forward. |
 | `LONG_POLL_TIMEOUT_MS` | `35000` | Client timeout for `getupdates`, clamped to 5–60 seconds. |
 | `WEBHOOK_MAX_ATTEMPTS` | `4` | Attempts for 429, 5xx, and network errors. Other 4xx are not retried. |
-| `RATE_LIMIT_SEND_PER_MINUTE` | `30` | Sliding window for HTTP `POST /send`. |
-| `GROKBOT_STATE_DIR` | `~/.grokbot-weixin` | Node only. |
+| `RATE_LIMIT_SEND_PER_MINUTE` | `30` | Sliding window for HTTP `POST /send`. `GET /media/:id` is not counted. |
+| `MEDIA_TTL_MS` | `900000` | How long `GET /media/:id` keeps working. Clamped to 1 minute–24 hours. |
+| `MEDIA_MAX_BYTES` | `10485760` | Largest decrypted object stored (10 MiB). Clamped to 64 KiB–32 MiB. |
+| `MEDIA_MAX_TOTAL_BYTES` | `67108864` | Total decrypted bytes kept at once (64 MiB). Oldest objects are deleted first. Raised to at least `MEDIA_MAX_BYTES`, and clamped to 256 MiB. |
+| `MEDIA_TRANSCODE_VOICE` | `true` | On Node, try to store SILK voice as WAV. The Worker has no SILK decoder, so voice there stays `audio/silk`. |
+| `GROKBOT_STATE_DIR` | `~/.grokbot-weixin` | Node only. Media files go in `media/` under this directory. |
 
 Generate a bridge token with `openssl rand -base64 32`.
 
-Logs are structured JSON. They include account and sender ids, message ids, HTTP status, and iLink `ret` codes. They omit message bodies, webhook keys, bot tokens, context tokens, and QR secrets.
+Logs are structured JSON. They include account and sender ids, message ids, HTTP status, and iLink `ret` codes. They omit message bodies, webhook keys, bot tokens, context tokens, QR secrets, CDN query parameters, and AES keys.
 
 ## Webhook event
 
@@ -93,15 +102,34 @@ Logs are structured JSON. They include account and sender ids, message ids, HTTP
   "sender": { "id": "owner@im.wechat", "name": null },
   "message_id": "123",
   "timestamp_ms": 1700000000000,
-  "type": "text",
+  "type": "mixed",
   "state": "finished",
   "text": "hello",
-  "media": [],
+  "media": [
+    {
+      "kind": "image",
+      "file_name": "image.jpg",
+      "transcript": null,
+      "has_cdn_reference": true,
+      "mime_type": "image/jpeg",
+      "size": 12345,
+      "url": "https://your-worker.example.workers.dev/media/0123456789abcdef0123456789abcdef",
+      "expires_at_ms": 1700000900000,
+      "duration_ms": null,
+      "error": null
+    }
+  ],
+  "quote": {
+    "title": "earlier note",
+    "text": "the quoted text",
+    "message_id": "122",
+    "media": []
+  },
   "context_token": "ctx",
   "chat_type": "direct",
   "reply": {
     "method": "POST",
-    "url": "https://bridge.example/send",
+    "url": "https://your-worker.example.workers.dev/send",
     "headers": {
       "Content-Type": "application/json",
       "Authorization": "Bearer <BRIDGE_TOKEN>"
@@ -116,9 +144,53 @@ Logs are structured JSON. They include account and sender ids, message ids, HTTP
 }
 ```
 
-`sender.name` is always `null`. The upstream message type has no display name. `reply.headers.Authorization` is the literal placeholder `Bearer <BRIDGE_TOKEN>`. The real token stays in the routine's secret store. `type` is `text`, `image`, `voice`, `file`, `video`, `mixed`, or `unknown`. Voice transcript text is copied into `text` when the message has no text items. `state` maps `message_state` 0/1/2 to `new` / `generating` / `finished`.
+`sender.name` is always `null`. The upstream message type has no display name. `reply.headers.Authorization` is the literal placeholder `Bearer <BRIDGE_TOKEN>`. The real token stays in the routine's secret store. `reply.url` and every media `url` use `BRIDGE_PUBLIC_URL`. The host above is a placeholder.
 
-Webhook retries wait 200 ms, 800 ms, then 2 s. A failed forward is logged and the cursor still advances, so one bad message cannot stall polling. A crash after the POST and before the dedupe write can deliver the same message again.
+`type` is `text`, `image`, `voice`, `file`, `video`, `mixed`, or `unknown`, from the sender's own items. A message that is only a quote is classified from the quote. `state` maps `message_state` 0/1/2 to `new` / `generating` / `finished`.
+
+`text` is the sender's own text. When that is empty, it is the voice transcript. When that is also empty, it is the quoted text. The transcript is always also on `media[].transcript` (and `quote.media[].transcript` for a quoted voice note), so a caption plus a voice note does not hide the transcript.
+
+`quote` is `null` when the message does not reference another message. Otherwise:
+
+| Field | Meaning |
+| --- | --- |
+| `title` | `ref_msg.title`, the server's short summary. |
+| `text` | Quoted text, or the quoted voice transcript. |
+| `message_id` | `ref_msg.svr_id`, when WeChat sent one. |
+| `media` | Quoted attachments. Same object shape as top-level `media`. One level of `ref_msg` is followed. |
+
+Each `media` object:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `image`, `voice`, `file`, or `video`. |
+| `file_name` | Name to save as. Files keep a sanitized WeChat name. Generated names look like `image.jpg`, `voice.wav`, `voice.silk`, `video.mp4`. |
+| `transcript` | `voice_item.text`, or `null`. |
+| `has_cdn_reference` | The item included `full_url` or `encrypt_query_param`. |
+| `mime_type` | Content-Type of the stored bytes, or `null`. |
+| `size` | Decrypted size in bytes, or `null`. |
+| `url` | `GET {BRIDGE_PUBLIC_URL}/media/{id}`, or `null` when the bytes were not stored. The id is 32 hex characters. The URL does not contain the token. |
+| `expires_at_ms` | Unix milliseconds. After this, the GET returns 404. |
+| `duration_ms` | Voice `playtime` in milliseconds, or `null`. |
+| `error` | `null` when `url` is set. Otherwise one of `no_reference`, `no_key`, `download_failed`, `decrypt_failed`, `too_large`, `too_many`, `storage_failed`, `public_url_missing`. |
+
+Download the bytes with the same bearer token as `/send`:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $BRIDGE_TOKEN" -o image.jpg "$url"
+```
+
+The response body is the decrypted file. `Content-Type` is `mime_type`. Images, audio, and video are `Content-Disposition: inline`. Other files are `attachment`.
+
+Decryption matches openclaw-weixin. The CDN object is AES-128-ECB with PKCS#7 padding. Images prefer `image_item.aeskey` (32 hex characters), then `media.aes_key`. An image with a CDN locator and no key is stored as downloaded. Voice, files, and video require `media.aes_key`: base64 of 16 raw bytes, or base64 of a 32-character hex key. `full_url` is used when it is public `https`. Otherwise the bridge GETs `{ILINK_CDN_BASE}/download?encrypted_query_param=`. Private, loopback, and link-local hosts in `full_url` are not fetched.
+
+Voice `encode_type` 7 (or an MP3 bitstream) is stored as `audio/mpeg`. `encode_type` 1 (PCM) is wrapped as `audio/wav` on both runtimes. SILK (`encode_type` 6, or absent, which is the usual WeChat voice note) becomes `audio/wav` on the Node runner when `silk-wasm` decodes it. The Worker does not decode SILK: the file is `audio/silk` and the transcript is the text the routine should read. `encode_type` 5 is `audio/amr` and 8 is `audio/ogg`, unchanged.
+
+`error: "no_key"` means voice, file, or video had a CDN locator and no usable AES key. The transcript is still set when WeChat sent one. `too_large` means the declared size or the downloaded object exceeded `MEDIA_MAX_BYTES`. `too_many` means the message had more than 8 downloadable attachments, counting the quote. `public_url_missing` means `BRIDGE_PUBLIC_URL` is empty, so no URL could be built and the bytes were not stored.
+
+On Cloudflare the plaintext is chunked into 64 KB SQLite rows on the account Durable Object (a row cannot exceed 2 MB). On Node the files are `$GROKBOT_STATE_DIR/media/<id>.bin` with mode `0600`. Expired rows are deleted on the next successful poll and when a GET finds them. No R2 bucket is required.
+
+Webhook retries wait 200 ms, 800 ms, then 2 s. A failed forward is logged and the cursor still advances, so one bad message cannot stall polling. A crash after the POST and before the dedupe write can deliver the same message again. A failed download does not drop the rest of the message: that slot's `error` is set and the webhook is still sent.
 
 ### Sample Grok Bot routine prompt
 
@@ -127,8 +199,16 @@ Paste this into the routine that receives the webhook. Store `BRIDGE_TOKEN` as a
 ```text
 You receive WeChat messages as JSON webhook events (schema grokbot-weixin.inbound.v1).
 
-Read sender.id, text, type, media, and context_token. sender.name is always null.
-Image, file, and video bytes are not attached. Voice messages may include a transcript in text.
+Read sender.id, text, type, media, quote, and context_token. sender.name is always null.
+text is the sender's own words, or the voice transcript when they sent no text, or the quoted text when both of those are empty.
+Voice transcripts are also on media[].transcript and quote.media[].transcript. Read those even when text is a caption.
+quote is a message they referenced: quote.title, quote.text, quote.message_id, and quote.media.
+
+When a media object has a url and error is null, download it before you answer. It expires at expires_at_ms.
+curl -fsSL -H "Authorization: Bearer $BRIDGE_TOKEN" -o /tmp/wechat-media "$url"
+Use mime_type and file_name. Images are ordinary image files; open the saved file and look at it.
+Voice from the Node bridge is often audio/wav. Voice from the Cloudflare bridge is often audio/silk (raw WeChat SILK); prefer the transcript, and only listen when the file is wav or mp3.
+Skip objects whose error is not null.
 
 Reply by POST to the event's reply.url (this is the bridge /send endpoint).
 Use the Authorization header "Bearer" plus the BRIDGE_TOKEN secret. Never print that token.
@@ -153,7 +233,7 @@ Workers Free includes SQLite Durable Objects. Figures below are from the Cloudfl
 - CPU time on Free is 10 ms per invocation. Waiting on `fetch` does not spend CPU. A consistently over-limit invocation is killed. Move to the Node runner or Workers Paid if logs show CPU cancellations.
 - Alarm wall time is 15 minutes. The long poll is 35 seconds, under that cap.
 - SQLite: 100,000 row writes per day and 5 million row reads. Each `setAlarm` is one row write. An idle 35-second poll is one alarm write when the cursor and dedupe set do not change.
-- 50 subrequests per invocation. One poll uses one `getupdates`, one webhook (up to four attempts), and sometimes `getconfig` plus `sendtyping`.
+- 50 subrequests per invocation. One poll uses one `getupdates`, one CDN GET per attachment (at most 8), one webhook (up to four attempts), and sometimes `getconfig` plus `sendtyping`.
 
 A healthy long poll therefore uses about `86400 / 35 ≈ 2,500` requests per day. If `getupdates` returns an empty batch immediately, the next alarm waits out the poll window instead of looping. A burst of inbound messages polls again after 250 ms.
 
@@ -179,10 +259,12 @@ After the first deploy, set the public origin and redeploy is unnecessary for a 
 
 ```bash
 npx wrangler secret put BRIDGE_PUBLIC_URL
-# value: https://grokbot-weixin.<account>.workers.dev   (no trailing slash)
+# value: https://your-worker.example.workers.dev   (no trailing slash)
 ```
 
 You can also set `BRIDGE_PUBLIC_URL` under `[vars]` in `wrangler.toml` if you prefer it in git. Leave the token and the webhook key out of that file.
+
+Inbound media does not add a secret, a binding, or an R2 bucket. `wrangler.toml` stays as it is. Decrypted bytes live in the account Durable Object until `MEDIA_TTL_MS` (default 15 minutes). Optional `MEDIA_TTL_MS`, `MEDIA_MAX_BYTES`, and `MEDIA_MAX_TOTAL_BYTES` can be `[vars]` when the defaults are wrong. `BRIDGE_PUBLIC_URL` must be set or each media object is stored nowhere and `error` is `public_url_missing`.
 
 Login, pick one:
 
@@ -257,7 +339,7 @@ docker run --rm -p 8787:8787 \
   grokbot-weixin
 ```
 
-The image listens on `0.0.0.0:8787` and stores state in `/data`. Publish that port only on a private network, then expose `/send` through an authenticated tunnel or reverse proxy. The container still requires `BRIDGE_TOKEN`.
+The image listens on `0.0.0.0:8787` and stores state in `/data`, including decrypted media in `/data/media`. Publish that port only on a private network, then expose `/send` and `/media` through an authenticated tunnel or reverse proxy. The container still requires `BRIDGE_TOKEN`. The image includes the SILK decoder, so voice notes are stored as WAV when decoding succeeds.
 
 ## Node CLI
 
@@ -286,6 +368,7 @@ grokbot-weixin export-session --out <file>
 | `POST /admin/session` | bearer or cookie | Body `{ "bot_token", "account_id", "base_url"?, "user_id"? }`. |
 | `POST /admin/allowlist` | bearer or cookie | Body `{ "allow_from": ["id"] }` (max 20). |
 | `POST /send` | bearer or cookie | Body `{ "to"?, "text", "context_token"?, "account"? }`. `to` is optional when exactly one sender is allowlisted. Text limit 8000 characters. |
+| `GET /media/:id` | bearer or cookie | Decrypted inbound bytes. `id` is 32 hex characters. 404 when the id is unknown or `expires_at_ms` has passed. Not counted by the `/send` rate limit. |
 
 Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie. Comparison hashes both strings with SHA-256 and compares the digests, so the check does not leak the secret's length. Values longer than 512 characters are rejected.
 
@@ -295,11 +378,16 @@ Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie
 - `/send` is how the routine talks to your WeChat account. Keep `BRIDGE_TOKEN` in a secret, and publish the endpoint only over HTTPS.
 - The allowlist is the access-control list. With `WEIXIN_PIN_FIRST_SENDER=true` and an empty list, the first scanner or the first inbound sender is pinned and later senders are ignored. Set `WEIXIN_ALLOW_FROM` before login if someone else might message the bot first.
 - `/send` refuses peers that are not on the allowlist, including when you pass your own `to`.
-- The webhook event tells the model how to call `/send` and uses a placeholder for the token. Put the real token in the routine secret, not in the prompt.
+- The webhook event tells the model how to call `/send` and `GET /media/:id`, and uses a placeholder for the token. Put the real token in the routine secret, not in the prompt.
+- A media URL is not enough by itself. The id is random, the object expires, and the GET still requires `BRIDGE_TOKEN`.
+- AES keys and CDN `encrypt_query_param` values are not written to the webhook or to logs. `full_url` is fetched only when it is public `https`.
 - Login QR responses returned to the browser omit the raw `qrcode` secret and the bot token. The SVG is generated locally from the QR URL.
 
 ## Known limits
 
+- Workers Free CPU is 10 ms. Waiting on `fetch` does not spend it. Duration headroom is small if anything else on the account is always on. AES decryption goes through Web Crypto. SILK decoding does not run on the Worker: a decode that overruns the CPU limit would cancel the poll. Voice on the Worker is `audio/silk` plus the transcript. Use the Node runner when the routine needs a WAV.
+- `MEDIA_MAX_BYTES` defaults to 10 MiB and cannot be set above 32 MiB. Larger files and videos come back as `error: "too_large"` with no bytes. On the Worker each stored object is about one SQLite row per 64 KB, and expiry deletes those rows. The Free plan allows 100,000 row writes per day, which covers a single user's photos and short voice notes. A long stretch of large videos can spend that budget.
+- `BRIDGE_PUBLIC_URL` has to be the internet origin. Without it, media `url` is null.
 - Direct messages only, matching upstream's stated channel scope. Group messages are dropped.
 - `context_token` is required by the send API in practice. Upstream issue [openclaw-weixin#225](https://github.com/Tencent/openclaw-weixin/issues/225) reports an empirical lifetime of about 48 hours and `ret: -2` with an empty `errmsg` when the token is stale. That lifetime and the meaning of `-2` are not in `docs/protocol.md`. This bridge maps `-2` to HTTP 409 and otherwise sends the stored token. Whether `sendmessage` accepts a body with no `context_token` was not confirmed.
 - A stale session returns iLink `-14` (documented in upstream `session-guard.ts`). Polling pauses for one hour. Log in again if it continues.
@@ -309,7 +397,6 @@ Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie
 - After `confirmed`, later API calls use `baseurl` from that response when it is present. QR login itself always starts at `ILINK_API_BASE`.
 - iLink user ids in the wild often end with `@im.wechat`. The bridge accepts any printable ASCII id up to 160 characters because the protocol doc does not fix the alphabet.
 - `getupdates` may echo the bot's own messages. Those are skipped. Whether that echo always happens was not re-checked against a live account.
-- Workers Free CPU is 10 ms. Duration headroom is small if anything else on the account is always on.
 - One bad webhook cannot stop the cursor. It also cannot be retried forever; the routine will not see that message again unless WeChat delivers it with a new id.
 - No real WeChat account is contacted by `npm test`. See Development.
 
@@ -323,7 +410,7 @@ npm run build
 
 `npm test` runs Vitest. `npm run build` typechecks the Node runner, typechecks the Worker, and runs `wrangler deploy --dry-run`.
 
-Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, and file modes `0700` / `0600`. The iLink server is a mock `fetch`. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
+Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, file modes `0700` / `0600`, inbound media parsing, AES-128-ECB decryption, and `GET /media/:id`. The iLink server and the CDN are mock `fetch` handlers. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
 
 ## 中文说明
 
@@ -341,7 +428,9 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 6. 把上面的英文 routine 提示词贴进 routine，并把 `BRIDGE_TOKEN` 放进 routine 的 secret。收到消息后，routine 按事件里的 `reply` 字段调用 `/send`。白名单里只有一个发送者时，主动发消息可以省略 `to`。
 7. 白名单默认钉住扫码的微信号。若要手工指定，设置 `WEIXIN_ALLOW_FROM` 或调用 `POST /admin/allowlist`。
 
-`npm test` 和 `npm run build` 只针对模拟的 iLink 服务。真实微信扫码无法在 CI 里完成。
+图片、文件和视频会先下载并解密，再放进 Durable Object（Node 则是 `$GROKBOT_STATE_DIR/media`）。事件里的 `media[].url` 是 `GET /media/:id`，要用同一个 `BRIDGE_TOKEN`，并在 `expires_at_ms` 之前取走。语音如果带了 `voice_item.text`，会出现在 `text` 和 `media[].transcript`。Cloudflare 上语音文件是原始 SILK（`audio/silk`）；Node 和 Docker 会尽量转成 WAV。引用消息在 `quote` 里，结构与正文附件相同。不需要新建 R2 bucket，也不用改 `wrangler.toml`。
+
+`npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 
 ## License
 

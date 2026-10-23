@@ -25,6 +25,7 @@
     "start": "node dist/node/cli.js start"
   },
   "dependencies": {
+    "silk-wasm": "3.7.1",
     "uqr": "0.1.3"
   },
   "devDependencies": {

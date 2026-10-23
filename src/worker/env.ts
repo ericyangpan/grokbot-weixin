@@ -26,6 +26,10 @@ export interface Env {
   LONG_POLL_TIMEOUT_MS?: string;
   WEBHOOK_MAX_ATTEMPTS?: string;
   RATE_LIMIT_SEND_PER_MINUTE?: string;
+  MEDIA_TTL_MS?: string;
+  MEDIA_MAX_BYTES?: string;
+  MEDIA_MAX_TOTAL_BYTES?: string;
+  MEDIA_TRANSCODE_VOICE?: string;
 }
 
 /** Copy string bindings into the core env map. The Durable Object namespace is not included. */
@@ -54,6 +58,10 @@ export function workerEnvRecord(env: Env): EnvMap {
     LONG_POLL_TIMEOUT_MS: env.LONG_POLL_TIMEOUT_MS,
     WEBHOOK_MAX_ATTEMPTS: env.WEBHOOK_MAX_ATTEMPTS,
     RATE_LIMIT_SEND_PER_MINUTE: env.RATE_LIMIT_SEND_PER_MINUTE,
+    MEDIA_TTL_MS: env.MEDIA_TTL_MS,
+    MEDIA_MAX_BYTES: env.MEDIA_MAX_BYTES,
+    MEDIA_MAX_TOTAL_BYTES: env.MEDIA_MAX_TOTAL_BYTES,
+    MEDIA_TRANSCODE_VOICE: env.MEDIA_TRANSCODE_VOICE,
   };
 }
 
