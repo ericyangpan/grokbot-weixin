@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { timingSafeEqual } from "../src/core/auth.js";
 import { handleBridgeRequest } from "../src/core/http.js";
 import { KEYS } from "../src/core/keys.js";
+import { runPollStep } from "../src/core/poll.js";
 import { writeAllowlist, writeContextTokens, writeSession } from "../src/core/state.js";
-import { makeApp, mockFetch } from "./support.js";
+import { makeApp, mockFetch, type CapturedRequest } from "./support.js";
 
 async function loggedInApp(fetchImpl: typeof fetch, overrides: Parameters<typeof makeApp>[1] = {}) {
   const app = makeApp(fetchImpl, overrides);
@@ -93,6 +94,61 @@ describe("POST /send", () => {
     expect(several.status).toBe(400);
     expect(await several.json()).toEqual({ ok: false, error: "recipient_required" });
     expect(mock.calls).toHaveLength(0);
+  });
+
+  it("sends to a pinned sender that fails the explicit peer-id check", async () => {
+    const pinned = "wei xin@im.wechat";
+    const mock = mockFetch((request) => {
+      if (request.url.pathname.endsWith("/getupdates")) {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            ret: 0,
+            msgs: [
+              {
+                message_id: "42",
+                from_user_id: pinned,
+                message_type: 1,
+                message_state: 2,
+                context_token: "ctx-pinned",
+                item_list: [{ type: 1, text_item: { text: "hi" } }],
+              },
+            ],
+            get_updates_buf: "c1",
+          }),
+        };
+      }
+      return { status: 200, body: JSON.stringify({ ret: 0, message_id: "77" }) };
+    });
+    const app = makeApp(mock.fetchImpl);
+    await writeSession(app.storage, {
+      botToken: "bot-secret",
+      accountId: "bot@im.wechat",
+      savedAt: 1,
+    });
+    await runPollStep(app);
+
+    const omitted = await handleBridgeRequest(send({ text: "x" }), app);
+    expect(omitted.status).toBe(200);
+    const omittedBody = await omitted.json() as Record<string, unknown>;
+    expect(omittedBody.ok).toBe(true);
+    expect(JSON.stringify(omittedBody)).not.toContain(pinned);
+
+    const blank = await handleBridgeRequest(send({ text: "x", to: "" }), app);
+    expect(blank.status).toBe(200);
+
+    const explicit = await handleBridgeRequest(send({ text: "x", to: pinned }), app);
+    expect(explicit.status).toBe(200);
+
+    const other = await handleBridgeRequest(send({ text: "x", to: "a@b" }), app);
+    expect(other.status).toBe(403);
+    expect(await other.json()).toEqual({ ok: false, error: "not_allowlisted" });
+
+    const sent = mock.calls
+      .filter((call: CapturedRequest) => call.url.pathname.endsWith("/sendmessage"))
+      .map((call) => (JSON.parse(call.body) as { msg: { to_user_id: string; context_token?: string } }).msg);
+    expect(sent.map((msg) => msg.to_user_id)).toEqual([pinned, pinned, pinned]);
+    expect(sent[0]?.context_token).toBe("ctx-pinned");
   });
 
   it("still rejects an explicit recipient that is not allowlisted", async () => {

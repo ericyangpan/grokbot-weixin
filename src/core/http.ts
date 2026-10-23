@@ -175,7 +175,9 @@ async function adminAllowlist(request: Request, app: BridgeApp): Promise<Respons
 
 /**
  * Send a text message. `to` may be omitted when the allowlist has exactly one
- * id; the response does not echo that id. An explicit `to` is checked as given.
+ * id. That stored id is used as pinned; it is not run through `isPeerId`.
+ * The response does not echo it. An explicit `to` that is not allowlisted
+ * must still match `isPeerId` or the request is rejected.
  */
 async function send(request: Request, app: BridgeApp): Promise<Response> {
   const body = await readJsonBody(request);
@@ -186,18 +188,24 @@ async function send(request: Request, app: BridgeApp): Promise<Response> {
   if (text.trim().length === 0 || text.length > SEND_TEXT_MAX) {
     return json({ ok: false, error: "bad_request" }, 400);
   }
-  const to = requestedTo || (await soleAllowlistedPeer(app));
-  if (to === null) return json({ ok: false, error: "recipient_required" }, 400);
-  if (!isPeerId(to)) {
+  if (contextToken !== undefined && (contextToken.length === 0 || contextToken.length > 4096)) {
     return json({ ok: false, error: "bad_request" }, 400);
   }
-  if (contextToken !== undefined && (contextToken.length === 0 || contextToken.length > 4096)) {
+  // Pinning stores from_user_id with no alphabet check. Re-checking that id
+  // here turned a one-entry allowlist into bad_request instead of a send.
+  const allow = await readAllowlist(app.storage);
+  let to = requestedTo;
+  if (!to) {
+    if (allow.length !== 1) return json({ ok: false, error: "recipient_required" }, 400);
+    const only = allow[0];
+    if (!only) return json({ ok: false, error: "recipient_required" }, 400);
+    to = only;
+  } else if (!allow.includes(to) && !isPeerId(to)) {
     return json({ ok: false, error: "bad_request" }, 400);
   }
   const session = await readSession(app.storage);
   if (!session) return json({ ok: false, error: "not_logged_in" }, 409);
   if (account && account !== session.accountId) return json({ ok: false, error: "not_allowlisted" }, 403);
-  const allow = await readAllowlist(app.storage);
   if (!allow.includes(to)) return json({ ok: false, error: "not_allowlisted" }, 403);
   const allowed = await takeSendSlot(app.storage, app.config.rateLimitPerMinute, appNow(app));
   if (!allowed) return json({ ok: false, error: "rate_limited" }, 429);
@@ -217,15 +225,6 @@ async function send(request: Request, app: BridgeApp): Promise<Response> {
     ...(result.messageId ? { message_id: result.messageId } : {}),
     context_token_missing: result.contextTokenMissing,
   });
-}
-
-/**
- * The single allowlisted sender when `to` was omitted.
- * Returns null when the caller must name a recipient.
- */
-async function soleAllowlistedPeer(app: BridgeApp): Promise<string | null> {
-  const allow = await readAllowlist(app.storage);
-  return allow.length === 1 ? (allow[0] ?? null) : null;
 }
 
 function publicLogin(session: QrLoginSession): Record<string, unknown> {
