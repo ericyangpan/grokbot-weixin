@@ -61,6 +61,49 @@ describe("POST /send", () => {
     expect(mock.calls[0]?.headers.get("authorization")).toBe("Bearer bot-secret");
   });
 
+  it("sends to the sole allowlisted peer when to is omitted", async () => {
+    const mock = mockFetch(() => ({ status: 200, body: JSON.stringify({ ret: 0, message_id: "70" }) }));
+    const app = await loggedInApp(mock.fetchImpl);
+    const response = await handleBridgeRequest(send({ text: "proactive" }), app);
+    expect(response.status).toBe(200);
+    const payload = await response.json() as Record<string, unknown>;
+    expect(payload.ok).toBe(true);
+    expect(JSON.stringify(payload)).not.toContain("owner@im.wechat");
+    const sent = JSON.parse(mock.calls[0]?.body ?? "{}") as { msg: { to_user_id: string; context_token?: string } };
+    expect(sent.msg.to_user_id).toBe("owner@im.wechat");
+    expect(sent.msg.context_token).toBe("stored-ctx");
+
+    const blank = await handleBridgeRequest(send({ to: "  ", text: "also" }), app);
+    expect(blank.status).toBe(200);
+    const second = JSON.parse(mock.calls[1]?.body ?? "{}") as { msg: { to_user_id: string } };
+    expect(second.msg.to_user_id).toBe("owner@im.wechat");
+  });
+
+  it("requires a recipient when the allowlist is empty", async () => {
+    const mock = mockFetch(() => ({ status: 200, body: JSON.stringify({ ret: 0 }) }));
+    const app = await loggedInApp(mock.fetchImpl);
+    await writeAllowlist(app.storage, []);
+    const response = await handleBridgeRequest(send({ text: "hi" }), app);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ ok: false, error: "recipient_required" });
+    expect(mock.calls).toHaveLength(0);
+
+    await writeAllowlist(app.storage, ["owner@im.wechat", "second@im.wechat"]);
+    const several = await handleBridgeRequest(send({ text: "hi" }), app);
+    expect(several.status).toBe(400);
+    expect(await several.json()).toEqual({ ok: false, error: "recipient_required" });
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  it("still rejects an explicit recipient that is not allowlisted", async () => {
+    const mock = mockFetch(() => ({ status: 200, body: JSON.stringify({ ret: 0 }) }));
+    const app = await loggedInApp(mock.fetchImpl);
+    const response = await handleBridgeRequest(send({ to: "other@im.wechat", text: "hi" }), app);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ ok: false, error: "not_allowlisted" });
+    expect(mock.calls).toHaveLength(0);
+  });
+
   it("rate limits and reports a rejected context token", async () => {
     const limited = mockFetch(() => ({ status: 200, body: JSON.stringify({ ret: 0 }) }));
     const limitedApp = await loggedInApp(limited.fetchImpl, { rateLimitPerMinute: 1 });

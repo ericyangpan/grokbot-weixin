@@ -133,13 +133,14 @@ Image, file, and video bytes are not attached. Voice messages may include a tran
 Reply by POST to the event's reply.url (this is the bridge /send endpoint).
 Use the Authorization header "Bearer" plus the BRIDGE_TOKEN secret. Never print that token.
 Body JSON: {"to": reply.body.to, "text": "<your reply>", "context_token": reply.body.context_token, "account": reply.body.account}.
+When the bridge allowlist has exactly one sender, omit "to" to send a proactive message to that sender. The response does not include the WeChat id.
 Keep the reply as plain text under 4000 characters.
 
 Stay silent when no reply is needed: do not call /send, and do not send a placeholder.
 Ignore events whose sender is unexpected. Do not invent a different recipient.
 ```
 
-`POST /send` body is `{ "to", "text", "context_token"?, "account"? }`. `account` must match the logged-in bot id when present. `context_token` is optional; the bridge uses the newest token stored for `to`. HTTP 409 `context_token_rejected` means iLink returned `ret: -2`. HTTP 403 means `to` is not allowlisted. HTTP 429 means the rate limit fired.
+`POST /send` body is `{ "to"?, "text", "context_token"?, "account"? }`. `to` is optional when the allowlist has exactly one sender; the bridge delivers to that sender and does not return the id. If `to` is omitted and the allowlist is empty or has more than one entry, the response is HTTP 400 `recipient_required`. An explicit `to` is used as given: a peer that is not allowlisted is HTTP 403. `account` must match the logged-in bot id when present. `context_token` is optional; the bridge uses the newest token stored for that sender. HTTP 409 `context_token_rejected` means iLink returned `ret: -2`. HTTP 429 means the rate limit fired.
 
 ## Cloudflare Workers (primary)
 
@@ -284,7 +285,7 @@ grokbot-weixin export-session --out <file>
 | `POST /login/verify` | bearer or cookie | Body `{ "code": "123456" }`. |
 | `POST /admin/session` | bearer or cookie | Body `{ "bot_token", "account_id", "base_url"?, "user_id"? }`. |
 | `POST /admin/allowlist` | bearer or cookie | Body `{ "allow_from": ["id"] }` (max 20). |
-| `POST /send` | bearer or cookie | Body `{ "to", "text", "context_token"?, "account"? }`. Text limit 8000 characters. |
+| `POST /send` | bearer or cookie | Body `{ "to"?, "text", "context_token"?, "account"? }`. `to` is optional when exactly one sender is allowlisted. Text limit 8000 characters. |
 
 Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie. Comparison hashes both strings with SHA-256 and compares the digests, so the check does not leak the secret's length. Values longer than 512 characters are rejected.
 
@@ -337,7 +338,7 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 3. Cloudflare：`wrangler secret put` 写入 `BRIDGE_TOKEN`、`GROK_WEBHOOK_URL`、`GROK_WEBHOOK_KEY`，`wrangler deploy`，再 `wrangler secret put BRIDGE_PUBLIC_URL` 为 Worker 的 https 源站。
 4. 浏览器打开 `https://<worker>/login`，输入 `BRIDGE_TOKEN`，用微信扫码确认。或在本机 `login` 后用 `export-session` 和 `POST /admin/session` 导入。
 5. 若使用了环境变量里的 token 而不是扫码，先访问一次 `GET /health`，轮询才会开始。
-6. 把上面的英文 routine 提示词贴进 routine，并把 `BRIDGE_TOKEN` 放进 routine 的 secret。收到消息后，routine 按事件里的 `reply` 字段调用 `/send`。
+6. 把上面的英文 routine 提示词贴进 routine，并把 `BRIDGE_TOKEN` 放进 routine 的 secret。收到消息后，routine 按事件里的 `reply` 字段调用 `/send`。白名单里只有一个发送者时，主动发消息可以省略 `to`。
 7. 白名单默认钉住扫码的微信号。若要手工指定，设置 `WEIXIN_ALLOW_FROM` 或调用 `POST /admin/allowlist`。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务。真实微信扫码无法在 CI 里完成。

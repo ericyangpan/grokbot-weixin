@@ -173,13 +173,22 @@ async function adminAllowlist(request: Request, app: BridgeApp): Promise<Respons
   return json({ ok: true, allowlist_count: ids.length });
 }
 
+/**
+ * Send a text message. `to` may be omitted when the allowlist has exactly one
+ * id; the response does not echo that id. An explicit `to` is checked as given.
+ */
 async function send(request: Request, app: BridgeApp): Promise<Response> {
   const body = await readJsonBody(request);
-  const to = typeof body.to === "string" ? body.to.trim() : "";
+  const requestedTo = typeof body.to === "string" ? body.to.trim() : "";
   const text = typeof body.text === "string" ? body.text : "";
   const contextToken = typeof body.context_token === "string" ? body.context_token : undefined;
   const account = typeof body.account === "string" ? body.account.trim() : undefined;
-  if (!isPeerId(to) || text.trim().length === 0 || text.length > SEND_TEXT_MAX) {
+  if (text.trim().length === 0 || text.length > SEND_TEXT_MAX) {
+    return json({ ok: false, error: "bad_request" }, 400);
+  }
+  const to = requestedTo || (await soleAllowlistedPeer(app));
+  if (to === null) return json({ ok: false, error: "recipient_required" }, 400);
+  if (!isPeerId(to)) {
     return json({ ok: false, error: "bad_request" }, 400);
   }
   if (contextToken !== undefined && (contextToken.length === 0 || contextToken.length > 4096)) {
@@ -208,6 +217,15 @@ async function send(request: Request, app: BridgeApp): Promise<Response> {
     ...(result.messageId ? { message_id: result.messageId } : {}),
     context_token_missing: result.contextTokenMissing,
   });
+}
+
+/**
+ * The single allowlisted sender when `to` was omitted.
+ * Returns null when the caller must name a recipient.
+ */
+async function soleAllowlistedPeer(app: BridgeApp): Promise<string | null> {
+  const allow = await readAllowlist(app.storage);
+  return allow.length === 1 ? (allow[0] ?? null) : null;
 }
 
 function publicLogin(session: QrLoginSession): Record<string, unknown> {
