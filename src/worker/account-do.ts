@@ -6,6 +6,7 @@ import { handleBridgeRequest } from "../core/http.js";
 import { logError, logInfo, publicError } from "../core/log.js";
 import { ensureSeeded } from "../core/persist.js";
 import { runPollStep } from "../core/poll.js";
+import { readSession } from "../core/state.js";
 import { DoMediaStore, ensureMediaSchema } from "./do-media.js";
 import { DoStorage } from "./do-storage.js";
 import { workerConfig, workerSeed, type Env } from "./env.js";
@@ -13,8 +14,12 @@ import { workerConfig, workerSeed, type Env } from "./env.js";
 /**
  * One Durable Object owns the single WeChat account.
  * Each alarm runs one getUpdates call, then schedules the next alarm.
+ *
+ * The class was renamed from AccountDurableObject. Migration v2 moves the
+ * existing SQLite database onto this class and drops the hot isolate that
+ * a long poll can keep on an older build. The instance name stays "owner".
  */
-export class AccountDurableObject extends DurableObject<Env> {
+export class AccountDurableObjectV2 extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -43,7 +48,17 @@ export class AccountDurableObject extends DurableObject<Env> {
     logInfo("do_request", { method: request.method, path: redactRequestPath(path) });
     const app = this.createApp();
     await ensureSeeded(app, workerSeed(this.env));
+    await this.ensureAlarm(app);
     return handleBridgeRequest(request, app);
+  }
+
+  /** Resume polling when a class reset cleared the alarm but the session is still stored. */
+  private async ensureAlarm(app: BridgeApp): Promise<void> {
+    const session = await readSession(app.storage);
+    if (!session) return;
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing !== null) return;
+    await this.ctx.storage.setAlarm(Date.now() + 200);
   }
 
   /**

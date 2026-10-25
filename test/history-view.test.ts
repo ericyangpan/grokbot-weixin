@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isHistoryRoute, requestForAccount } from "../src/core/account-request.js";
+import { bufferedAccountBody, isHistoryRoute, requestForAccount } from "../src/core/account-request.js";
 import { configFromEnv } from "../src/core/config.js";
 import { handleBridgeRequest } from "../src/core/http.js";
 import { historyStorageKey } from "../src/core/history.js";
@@ -135,7 +135,10 @@ describe("history view", () => {
     const app = viewApp();
     await seedHistory(app);
     const incoming = mintRequest();
-    const forwarded = requestForAccount(incoming);
+    const bytes = await bufferedAccountBody(incoming);
+    const forwarded = requestForAccount(incoming, bytes);
+    const replay = requestForAccount(incoming, bytes);
+    expect(await replay.text()).toBe("{}");
     expect(forwarded.method).toBe("POST");
     expect(new URL(forwarded.url).pathname).toBe("/history/session");
     expect(new URL(forwarded.url).host).toBe("bridge.internal");

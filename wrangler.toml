@@ -38,8 +38,17 @@ RATE_LIMIT_SEND_PER_MINUTE = "30"
 
 [[durable_objects.bindings]]
 name = "ACCOUNT"
-class_name = "AccountDurableObject"
+class_name = "AccountDurableObjectV2"
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AccountDurableObject"]
+
+# Moves the existing SQLite database (session, allowlist, cursor, history, media)
+# onto the new class. Does not delete it. Applied once by `wrangler deploy`.
+[[migrations]]
+tag = "v2"
+
+  [[migrations.renamed_classes]]
+  from = "AccountDurableObject"
+  to = "AccountDurableObjectV2"
