@@ -3,6 +3,7 @@ import { appNow } from "./app.js";
 import { timingSafeEqual } from "./auth.js";
 import { MAX_HISTORY_VIEW_GRANTS } from "./constants.js";
 import { loadPeerHistory } from "./history.js";
+import { loadStoredMedia } from "./media.js";
 import { KEYS } from "./keys.js";
 import { logInfo, logWarn } from "./log.js";
 import { readJson, writeJson } from "./storage.js";
@@ -115,10 +116,20 @@ export async function sweepHistoryViews(app: BridgeApp): Promise<void> {
   });
 }
 
-/** HTML transcript for one peer. Oldest first. Media URLs are not rendered. */
+/** HTML transcript for one peer. Oldest first. Playable bytes use a cookie-scoped path. */
 export async function renderHistoryDocument(app: BridgeApp, peer: string, expiresAtMs: number): Promise<string> {
   const turns = await loadPeerHistory(app, peer);
-  return renderPage(peer, expiresAtMs, turns);
+  const live = await liveMediaMimes(app, turns ?? []);
+  return renderPage(peer, expiresAtMs, turns, live);
+}
+
+/** True when this peer's transcript names the stored object. */
+export function historyMentionsMedia(turns: HistoryTurn[], id: string): boolean {
+  for (const turn of turns) {
+    if (turn.media.some((item) => item.id === id)) return true;
+    if (turn.quote?.media.some((item) => item.id === id)) return true;
+  }
+  return false;
 }
 
 /** Short page used for a missing or expired view. Contains no transcript. */
@@ -143,10 +154,11 @@ export function historySessionCookie(secret: string, maxAgeSec: number, secure: 
 export function redactRequestPath(path: string): string {
   return path
     .replace(/^\/history\/r\/[0-9a-f]{64}$/, "/history/r/:code")
+    .replace(/^\/history\/media\/[0-9a-f]{32}$/, "/history/media/:id")
     .replace(/^\/media\/[0-9a-f]{32}$/, "/media/:id");
 }
 
-function renderPage(peer: string, expiresAtMs: number, turns: HistoryTurn[] | null): string {
+function renderPage(peer: string, expiresAtMs: number, turns: HistoryTurn[] | null, live: Map<string, string>): string {
   const when = new Date(expiresAtMs).toISOString();
   const body = [
     "<h1>Conversation</h1>",
@@ -160,40 +172,112 @@ function renderPage(peer: string, expiresAtMs: number, turns: HistoryTurn[] | nu
     const ordered = turns
       .map((turn, index) => ({ turn, index }))
       .sort((left, right) => left.turn.at_ms - right.turn.at_ms || left.index - right.index);
-    for (const item of ordered) body.push(renderTurn(item.turn));
+    for (const item of ordered) body.push(renderTurn(item.turn, live));
   }
   return document("Conversation", body.join(""));
 }
 
-function renderTurn(turn: HistoryTurn): string {
+function renderTurn(turn: HistoryTurn, live: Map<string, string>): string {
   const who = turn.role === "assistant" ? "Assistant" : "You";
   const at = Number.isFinite(turn.at_ms) ? new Date(turn.at_ms).toISOString() : "";
+  const seen = new Set<string>();
+  const text = turn.text.trim();
+  const textIsTranscript = text.length > 0 && turn.media.some((item) => (item.transcript?.trim() ?? "") === text);
+  const textHtml = text && !textIsTranscript ? `<div class="text">${escapeHtml(turn.text)}</div>` : "";
+  if (text && !textIsTranscript) seen.add(text);
   const bits = [
     `<article class="${turn.role === "assistant" ? "assistant" : "user"}">`,
     `<div class="who">${who} <span class="when">${escapeHtml(at)}</span></div>`,
-    `<div class="text">${escapeHtml(turn.text)}</div>`,
-    renderMedia(turn.media),
-    renderQuote(turn.quote),
+    textHtml,
+    renderMedia(turn.media, live, seen),
+    renderQuote(turn.quote, live),
     "</article>",
   ];
   return bits.filter((part) => part.length > 0).join("");
 }
 
-function renderMedia(media: HistoryMedia[]): string {
+function renderMedia(media: HistoryMedia[], live: Map<string, string>, seen: Set<string>): string {
   if (media.length === 0) return "";
-  const lines = media.map((item) => {
-    const name = item.file_name ? ` · ${item.file_name}` : "";
-    const transcript = item.transcript ? `<div>Transcript: ${escapeHtml(item.transcript)}</div>` : "";
-    return `<div>${escapeHtml(item.kind + name)}</div>${transcript}`;
-  });
-  return `<div class="media">${lines.join("")}</div>`;
+  return `<div class="media">${media.map((item) => renderAttachment(item, live, seen)).join("")}</div>`;
 }
 
-function renderQuote(quote: HistoryQuote | null): string {
+function renderAttachment(item: HistoryMedia, live: Map<string, string>, seen: Set<string>): string {
+  const transcript = item.transcript?.trim() ?? "";
+  const words = transcript && !seen.has(transcript) ? `<div class="text">${escapeHtml(item.transcript ?? "")}</div>` : "";
+  if (transcript) seen.add(transcript);
+  return `<div class="attach">${renderControl(item, live)}${words}</div>`;
+}
+
+function renderControl(item: HistoryMedia, live: Map<string, string>): string {
+  const id = item.id && /^[0-9a-f]{32}$/.test(item.id) ? item.id : null;
+  const mime = id ? live.get(id) : undefined;
+  const src = id && mime ? `/history/media/${id}` : null;
+  if (item.kind === "voice") {
+    if (src && playableAudio(mime)) return `<audio controls preload="none" src="${src}"></audio>`;
+    return `<p class="marker">Voice message</p>`;
+  }
+  if (item.kind === "image") {
+    if (src && playableImage(mime)) return `<img src="${src}" alt="${escapeHtml(item.file_name ?? "Image")}">`;
+    return `<p class="marker">${escapeHtml(marker(item, "Image"))}</p>`;
+  }
+  if (item.kind === "video") {
+    if (src && playableVideo(mime)) return `<video controls preload="none" src="${src}"></video>`;
+    return `<p class="marker">${escapeHtml(marker(item, "Video"))}</p>`;
+  }
+  if (src) return `<p class="marker"><a href="${src}">${escapeHtml(item.file_name ?? "File")}</a></p>`;
+  return `<p class="marker">${escapeHtml(marker(item, "File"))}</p>`;
+}
+
+function renderQuote(quote: HistoryQuote | null, live: Map<string, string>): string {
   if (!quote) return "";
+  const seen = new Set<string>();
+  const text = quote.text?.trim() ?? "";
+  const textIsTranscript = text.length > 0 && quote.media.some((item) => (item.transcript?.trim() ?? "") === text);
+  if (text && !textIsTranscript) seen.add(text);
   const title = quote.title ? `<div>${escapeHtml(quote.title)}</div>` : "";
-  const text = quote.text ? `<div>${escapeHtml(quote.text)}</div>` : "";
-  return `<div class="quote"><div class="who">Quoted</div>${title}${text}${renderMedia(quote.media)}</div>`;
+  const words = text && !textIsTranscript ? `<div class="text">${escapeHtml(quote.text ?? "")}</div>` : "";
+  return `<div class="quote"><div class="who">Quoted</div>${title}${words}${renderMedia(quote.media, live, seen)}</div>`;
+}
+
+function marker(item: HistoryMedia, fallback: string): string {
+  return item.file_name ? `${fallback} · ${item.file_name}` : fallback;
+}
+
+function playableAudio(mime: string | undefined): boolean {
+  return AUDIO_MIME.has(baseMime(mime));
+}
+
+function playableVideo(mime: string | undefined): boolean {
+  return VIDEO_MIME.has(baseMime(mime));
+}
+
+function playableImage(mime: string | undefined): boolean {
+  const value = baseMime(mime);
+  return value === "image/jpeg" || value === "image/png" || value === "image/gif" || value === "image/webp";
+}
+
+function baseMime(mime: string | undefined): string {
+  const head = (mime ?? "").toLowerCase().split(";", 1)[0];
+  return (head ?? "").trim();
+}
+
+const AUDIO_MIME = new Set(["audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "audio/aac"]);
+
+const VIDEO_MIME = new Set(["video/mp4", "video/webm", "video/ogg"]);
+
+/** Mimes of objects that are still stored. Expired and missing ids are omitted. */
+async function liveMediaMimes(app: BridgeApp, turns: HistoryTurn[]): Promise<Map<string, string>> {
+  const live = new Map<string, string>();
+  const ids = new Set<string>();
+  for (const turn of turns) {
+    for (const item of turn.media) if (item.id) ids.add(item.id);
+    for (const item of turn.quote?.media ?? []) if (item.id) ids.add(item.id);
+  }
+  for (const id of ids) {
+    const object = await loadStoredMedia(app, id);
+    if (object) live.set(id, object.mimeType);
+  }
+  return live;
 }
 
 function document(title: string, main: string): string {
@@ -216,6 +300,10 @@ function document(title: string, main: string): string {
     ".when{color:#71717a;font-weight:400}",
     ".text{white-space:pre-wrap;word-break:break-word}",
     ".media,.quote{margin-top:.45rem;font-size:.9rem;color:#3f3f46}",
+    ".marker{margin:.35rem 0}",
+    "audio,video{display:block;width:100%;margin:.35rem 0}",
+    "img{display:block;max-width:100%;height:auto;margin:.35rem 0;border-radius:.4rem}",
+    "a{color:#1d4ed8}",
     "</style></head><body><main>",
     main,
     "</main></body></html>",

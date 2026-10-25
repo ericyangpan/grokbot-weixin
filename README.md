@@ -238,8 +238,10 @@ history is the recent conversation with this sender, oldest first. It does not i
 Each history entry has role ("user" or "assistant"), text, type, media, quote, at_ms, and message_id.
 assistant means text this bridge already sent, including a proactive /send. user means an earlier WeChat message.
 Use history before interpreting a short reply. "OK" may be answering the previous assistant question.
-history media and history quote.media only have kind, file_name, and transcript. They have no url.
+history media and history quote.media have kind, file_name, and transcript. They have no url.
+They may also have id and mime_type when bytes were stored. id is not a download link and may already have expired.
 text is the sender's own words, or the voice transcript when they sent no text, or the quoted text when both of those are empty.
+Voice transcripts come from WeChat (voice_item.text). The bridge does not run speech recognition.
 Voice transcripts are also on media[].transcript and quote.media[].transcript. Read those even when text is a caption.
 quote is a message they referenced: quote.title, quote.text, quote.message_id, and quote.media.
 
@@ -421,7 +423,8 @@ grokbot-weixin export-session --out <file>
 | `GET /media/:id` | bearer or cookie | Decrypted inbound bytes. `id` is 32 hex characters. 404 when the id is unknown or `expires_at_ms` has passed. Not counted by the `/send` rate limit. |
 | `POST /history/session` | bearer or login cookie | Mints a history view. Body `{ "peer"? }`. `peer` is optional when the allowlist has one sender; otherwise it is required and must be allowlisted. Response `{ "ok": true, "url", "expires_at_ms" }` plus `Set-Cookie`. `url` is `{BRIDGE_PUBLIC_URL}/history/r/<64 hex>` with no query string. `expires_at_ms` is when that code and the cookie minted by this response stop working. HTTP 409 `public_url_missing` when `BRIDGE_PUBLIC_URL` is empty. The response does not include the peer id. |
 | `GET /history/r/:code` | one-shot code | Redeems the code, sets cookie `gb_hist` (`HttpOnly`, `SameSite=Lax`, `Path=/history`, `Secure` on HTTPS), and `303` to `/history`. The code is deleted. A second GET, a bad code, or an expired code is 404 and shows no transcript. |
-| `GET /history` | `gb_hist` cookie | The transcript, oldest first: text, media kind, file name, and transcript. No media download URLs. `Cache-Control: private, no-store`. Missing, forged, or expired cookie is 401 and shows no transcript. `Authorization: Bearer BRIDGE_TOKEN` does not open this page. |
+| `GET /history` | `gb_hist` cookie | The transcript, oldest first. A voice note shows its WeChat transcript once, with an audio control when the stored file is still available and the browser can play it (such as WAV or MP3). SILK is not given a player. Images, video, and files are shown without a transcript label. `Cache-Control: private, no-store`. Missing, forged, or expired cookie is 401 and shows no transcript. `Authorization: Bearer BRIDGE_TOKEN` does not open this page. |
+| `GET /history/media/:id` | `gb_hist` cookie | Bytes for an object named in that peer's transcript. `id` is 32 hex characters. 401 without the view cookie, 404 when the id is absent from that transcript or the object has expired. The bridge token is not accepted. |
 
 Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie. Comparison hashes both strings with SHA-256 and compares the digests, so the check does not leak the secret's length. Values longer than 512 characters are rejected.
 
@@ -487,7 +490,7 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 
 每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。历史读写失败不会把已经发给微信的消息报成失败，也不会少发或多发 webhook。
 
-要在网页上看对话：routine 用 `BRIDGE_TOKEN` 调用 `POST /history/session`，只把返回的 `url` 发给用户。那个地址里的码只能用一次，打开后变成 HttpOnly cookie 并跳到 `/history`。默认 15 分钟过期，上限 30 分钟（`HISTORY_VIEW_TTL_MS`）。不要把 `BRIDGE_TOKEN` 放进链接。`/health` 里 `history_view` 为 true 时，说明当前进程带有这个页面。部署里的迁移 `v2` 把 Durable Object 类从 `AccountDurableObject` 改名为 `AccountDurableObjectV2`，SQLite 里的登录、白名单和历史跟着走，不用重新扫码。实例名仍是 `owner`。
+要在网页上看对话：routine 用 `BRIDGE_TOKEN` 调用 `POST /history/session`，只把返回的 `url` 发给用户。那个地址里的码只能用一次，打开后变成 HttpOnly cookie 并跳到 `/history`。默认 15 分钟过期，上限 30 分钟（`HISTORY_VIEW_TTL_MS`）。不要把 `BRIDGE_TOKEN` 放进链接。语音转写来自微信，页面上只出现一次；WAV、MP3 这类还能播放的录音会有一个播放器，SILK 不会假装能播。`/health` 里 `history_view` 为 true 时，说明当前进程带有这个页面。部署里的迁移 `v2` 把 Durable Object 类从 `AccountDurableObject` 改名为 `AccountDurableObjectV2`，SQLite 里的登录、白名单和历史跟着走，不用重新扫码。实例名仍是 `owner`。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 

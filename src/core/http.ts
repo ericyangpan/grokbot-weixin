@@ -14,10 +14,12 @@ import {
   peerForHistoryCookie,
   redeemHistoryCode,
   redactRequestPath,
+  historyMentionsMedia,
   renderHistoryDenied,
   renderHistoryDocument,
   sweepHistoryViews,
 } from "./history-view.js";
+import { loadPeerHistory } from "./history.js";
 import { persistConfirmedLogin } from "./persist.js";
 import { qrSvg } from "./qr.js";
 import { readAllowlist, readSession, localBotTokens, writeAllowlist } from "./state.js";
@@ -34,6 +36,8 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "GET" && path === "/login") return loginPage(request, app);
     if (request.method === "POST" && path === "/login/session") return loginSession(request, app);
     if (request.method === "GET" && path === "/history") return historyPage(request, app);
+    const historyMediaId = historyMediaIdFromPath(path);
+    if (request.method === "GET" && historyMediaId) return historyMedia(request, app, historyMediaId);
     const viewCode = historyCodeFromPath(path);
     if (request.method === "GET" && viewCode) return redeemHistoryLink(request, app, viewCode);
     if (!(await isAuthorized(request, app.config.bridgeToken))) return json({ ok: false, error: "unauthorized" }, 401);
@@ -332,6 +336,11 @@ function historyCodeFromPath(path: string): string | null {
   return match?.[1] ?? null;
 }
 
+function historyMediaIdFromPath(path: string): string | null {
+  const match = /^\/history\/media\/([0-9a-f]{32})$/.exec(path);
+  return match?.[1] ?? null;
+}
+
 function requestIsSecure(request: Request): boolean {
   return new URL(request.url).protocol === "https:";
 }
@@ -345,10 +354,24 @@ function historyHtml(body: string, status: number, secure: boolean): Response {
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
       "X-Robots-Tag": "noindex",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+      "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
       ...(secure ? { "Strict-Transport-Security": "max-age=31536000" } : {}),
     },
   });
+}
+
+/**
+ * Bytes for one object named by the signed-in peer's transcript.
+ * The history cookie is enough. The bridge token is not accepted here.
+ */
+async function historyMedia(request: Request, app: BridgeApp, id: string): Promise<Response> {
+  await sweepHistoryViews(app);
+  const secret = readCookie(request.headers.get("Cookie"), HISTORY_COOKIE);
+  const session = await peerForHistoryCookie(app, secret);
+  if (!session) return json({ ok: false, error: "unauthorized" }, 401);
+  const turns = await loadPeerHistory(app, session.peer);
+  if (!turns || !historyMentionsMedia(turns, id)) return json({ ok: false, error: "not_found" }, 404);
+  return serveMedia(app, id);
 }
 
 /** GET /media/:id. The caller is already authenticated. Missing and expired ids are both 404. */

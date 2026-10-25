@@ -176,11 +176,18 @@ export interface QuoteInfo {
 
 export type InboundType = "text" | MediaKind | "mixed" | "unknown";
 
-/** Descriptive media fields kept in history. URLs are omitted because they expire. */
+/**
+ * Descriptive media fields kept in history. Download URLs are omitted because they expire.
+ * `id` and `mime_type` are optional and absent on transcripts saved before the history page
+ * could play stored bytes. `id` is not a credential.
+ */
 export interface HistoryMedia {
   kind: MediaKind;
   file_name: string | null;
+  /** WeChat `voice_item.text` when this item is a voice note. The bridge does not run ASR. */
   transcript: string | null;
+  id?: string;
+  mime_type?: string;
 }
 
 /** Quote summary stored with a past user turn. */
@@ -224,7 +231,7 @@ export interface InboundEvent {
   quote: QuoteInfo | null;
   /**
    * Earlier turns with this sender, oldest first. Does not include this message.
-   * Media entries have no download URL.
+   * Media entries have no download URL. They may include an optional stored `id`.
    */
   history: HistoryTurn[];
   context_token: string | null;

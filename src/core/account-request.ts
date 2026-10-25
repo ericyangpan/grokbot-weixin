@@ -39,5 +39,10 @@ export function requestForAccount(request: Request, body: Uint8Array | null): Re
 /** History pages are dispatched by an RPC method so a rewritten fetch URL cannot hide them. */
 export function isHistoryRoute(pathname: string): boolean {
   const path = pathname.replace(/\/+$/, "") || "/";
-  return path === "/history" || path === "/history/session" || /^\/history\/r\/[0-9a-f]{64}$/.test(path);
+  return (
+    path === "/history" ||
+    path === "/history/session" ||
+    /^\/history\/r\/[0-9a-f]{64}$/.test(path) ||
+    /^\/history\/media\/[0-9a-f]{32}$/.test(path)
+  );
 }

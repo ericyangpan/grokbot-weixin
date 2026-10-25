@@ -162,7 +162,31 @@ function summarizeQuote(event: InboundEvent): HistoryQuote | null {
 }
 
 function summarizeMedia(item: MediaInfo): HistoryMedia {
-  return { kind: item.kind, file_name: item.file_name, transcript: item.transcript };
+  const id = mediaIdFromStoredUrl(item.url);
+  const mime = storedMime(item.mime_type);
+  return {
+    kind: item.kind,
+    file_name: item.file_name,
+    transcript: item.transcript,
+    ...(id ? { id } : {}),
+    ...(mime ? { mime_type: mime } : {}),
+  };
+}
+
+/** Pull a stored object id out of a bridge media URL. Other URLs are ignored. */
+function mediaIdFromStoredUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const match = /^\/media\/([0-9a-f]{32})$/.exec(new URL(url).pathname);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function storedMime(value: string | null): string | null {
+  if (!value || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(value) || value.length > 80) return null;
+  return value.toLowerCase();
 }
 
 /**
@@ -274,10 +298,14 @@ function parseMediaList(value: unknown): HistoryMedia[] {
     const record = item as Record<string, unknown>;
     const kind = record.kind;
     if (kind !== "image" && kind !== "voice" && kind !== "file" && kind !== "video") continue;
+    const id = typeof record.id === "string" && /^[0-9a-f]{32}$/.test(record.id) ? record.id : null;
+    const mime = storedMime(typeof record.mime_type === "string" ? record.mime_type : null);
     media.push({
       kind,
       file_name: typeof record.file_name === "string" ? record.file_name : null,
       transcript: typeof record.transcript === "string" ? record.transcript : null,
+      ...(id ? { id } : {}),
+      ...(mime ? { mime_type: mime } : {}),
     });
   }
   return media;
@@ -305,7 +333,7 @@ function turnWeight(turn: HistoryTurn): number {
 }
 
 function mediaWeight(item: HistoryMedia): number {
-  return item.kind.length + (item.file_name?.length ?? 0) + (item.transcript?.length ?? 0);
+  return item.kind.length + (item.file_name?.length ?? 0) + (item.transcript?.length ?? 0) + (item.id?.length ?? 0) + (item.mime_type?.length ?? 0);
 }
 
 /**

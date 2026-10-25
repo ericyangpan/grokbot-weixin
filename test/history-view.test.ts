@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import { bufferedAccountBody, isHistoryRoute, requestForAccount } from "../src/core/account-request.js";
 import { configFromEnv } from "../src/core/config.js";
 import { handleBridgeRequest } from "../src/core/http.js";
-import { historyStorageKey } from "../src/core/history.js";
+import { historyStorageKey, loadPeerHistory, rememberInbound } from "../src/core/history.js";
 import { redactRequestPath } from "../src/core/history-view.js";
 import { writeAllowlist } from "../src/core/state.js";
 import { makeApp } from "./support.js";
 import type { BridgeApp } from "../src/core/app.js";
+import type { InboundEvent } from "../src/core/types.js";
 
 const NOW = 1_700_000_000_000;
 const DINNER = "what time is the dinner?";
@@ -46,6 +47,7 @@ describe("history view", () => {
       expect(directHtml).toContain("plans");
       expect(directHtml).not.toContain("<script>");
       expect(directHtml).toContain("&lt;script&gt;");
+      expect(directHtml).not.toContain("Transcript:");
       expect(directHtml).not.toMatch(/https?:\/\//);
       expect(direct.headers.get("cache-control")).toContain("no-store");
 
@@ -164,6 +166,114 @@ describe("history view", () => {
     expect(await health.json()).toMatchObject({ ok: true, history_view: true });
   });
 
+  it("shows a voice transcript once and plays only browser audio that is still stored", async () => {
+    const app = viewApp();
+    await writeAllowlist(app.storage, ["owner@im.wechat"]);
+    const put = (mimeType: string, fileName: string, bytes: number[]) =>
+      app.media.put({
+        bytes: Uint8Array.from(bytes),
+        mimeType,
+        fileName,
+        createdAtMs: NOW,
+        expiresAtMs: NOW + 60_000,
+        maxTotalBytes: 1_000_000,
+      });
+    const wav = await put("audio/wav", "voice.wav", [82, 73, 70, 70]);
+    const silk = await put("audio/silk", "voice.silk", [2, 3, 4, 5]);
+    const image = await put("image/jpeg", "photo.jpg", [255, 216]);
+    const gone = await put("audio/wav", "old.wav", [1]);
+    await app.media.delete(gone.id);
+    await app.storage.set(
+      await historyStorageKey("owner@im.wechat"),
+      JSON.stringify([
+        {
+          role: "user",
+          text: "seven thirty",
+          type: "voice",
+          media: [{ kind: "voice", file_name: "voice.wav", transcript: "seven thirty", id: wav.id, mime_type: "audio/wav" }],
+          quote: null,
+          at_ms: NOW - 4_000,
+          message_id: "v1",
+        },
+        {
+          role: "user",
+          text: "on my way",
+          type: "voice",
+          media: [{ kind: "voice", file_name: "voice.silk", transcript: "leaving now", id: silk.id, mime_type: "audio/silk" }],
+          quote: null,
+          at_ms: NOW - 3_000,
+          message_id: "v2",
+        },
+        {
+          role: "user",
+          text: "see this",
+          type: "image",
+          media: [{ kind: "image", file_name: "photo.jpg", transcript: null, id: image.id, mime_type: "image/jpeg" }],
+          quote: null,
+          at_ms: NOW - 2_000,
+          message_id: "v3",
+        },
+        {
+          role: "user",
+          text: "too late",
+          type: "voice",
+          media: [{ kind: "voice", file_name: "old.wav", transcript: "too late", id: gone.id, mime_type: "audio/wav" }],
+          quote: null,
+          at_ms: NOW - 1_000,
+          message_id: "v4",
+        },
+      ]),
+    );
+
+    const minted = await handleBridgeRequest(mintRequest(), app);
+    const secret = cookieValue(minted.headers.get("set-cookie") ?? "");
+    const page = await handleBridgeRequest(historyRequest(secret), app);
+    const html = await page.text();
+    expect(times(html, "seven thirty")).toBe(1);
+    expect(times(html, "leaving now")).toBe(1);
+    expect(times(html, "on my way")).toBe(1);
+    expect(times(html, "too late")).toBe(1);
+    expect(html).not.toContain("Transcript:");
+    expect(html).toContain(`<audio controls preload="none" src="/history/media/${wav.id}"></audio>`);
+    expect(html).toContain(`<img src="/history/media/${image.id}" alt="photo.jpg">`);
+    expect(html).toContain("Voice message");
+    expect(html).not.toContain("audio/silk");
+    expect(html).not.toContain(silk.id);
+    expect(html).not.toContain(gone.id);
+    expect(html).not.toContain(TOKEN);
+    expect(html.match(/<audio /g)?.length ?? 0).toBe(1);
+
+    const audio = await handleBridgeRequest(historyRequest(secret, `/history/media/${wav.id}`), app);
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get("content-type")).toContain("audio/wav");
+    const missingCookie = await handleBridgeRequest(new Request(`https://bridge.example/history/media/${wav.id}`), app);
+    expect(missingCookie.status).toBe(401);
+    const bearer = await handleBridgeRequest(
+      new Request(`https://bridge.example/history/media/${wav.id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      app,
+    );
+    expect(bearer.status).toBe(401);
+    const stranger = await handleBridgeRequest(historyRequest(secret, `/history/media/${"ab".repeat(16)}`), app);
+    expect(stranger.status).toBe(404);
+    expect(await stranger.text()).not.toContain("seven thirty");
+  });
+
+  it("stores a media id on history without keeping the download url", async () => {
+    const app = viewApp();
+    const id = "12".repeat(16);
+    await rememberInbound(app, "owner@im.wechat", voiceEvent(id));
+    const turns = await loadPeerHistory(app, "owner@im.wechat");
+    expect(turns?.[0]?.media[0]).toEqual({
+      kind: "voice",
+      file_name: "voice.wav",
+      transcript: "seven thirty",
+      id,
+      mime_type: "audio/wav",
+    });
+    expect(JSON.stringify(turns)).not.toContain("https://");
+    expect(JSON.stringify(turns)).not.toContain(TOKEN);
+  });
+
   it("clamps the view ttl and redacts codes in request paths", () => {
     expect(configFromEnv({}).historyViewTtlMs).toBe(900_000);
     expect(configFromEnv({ HISTORY_VIEW_TTL_MS: "99999999" }).historyViewTtlMs).toBe(1_800_000);
@@ -171,6 +281,8 @@ describe("history view", () => {
     const code = "a".repeat(64);
     expect(redactRequestPath(`/history/r/${code}`)).toBe("/history/r/:code");
     expect(redactRequestPath(`/history/r/${code}`)).not.toContain(code);
+    const media = "ab".repeat(16);
+    expect(redactRequestPath(`/history/media/${media}`)).toBe("/history/media/:id");
   });
 });
 
@@ -216,10 +328,52 @@ function mintRequest(token = TOKEN, body: unknown = {}): Request {
   });
 }
 
-function historyRequest(secret: string): Request {
-  return new Request("https://bridge.example/history", {
+function historyRequest(secret: string, path = "/history"): Request {
+  return new Request(`https://bridge.example${path}`, {
     headers: { Cookie: `gb_hist=${encodeURIComponent(secret)}` },
   });
+}
+
+function times(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
+function voiceEvent(id: string): InboundEvent {
+  return {
+    schema: "grokbot-weixin.inbound.v1",
+    account_id: "bot@im.wechat",
+    sender: { id: "owner@im.wechat", name: null },
+    message_id: "v1",
+    timestamp_ms: NOW,
+    type: "voice",
+    state: "finished",
+    text: "seven thirty",
+    media: [
+      {
+        kind: "voice",
+        file_name: "voice.wav",
+        transcript: "seven thirty",
+        has_cdn_reference: true,
+        mime_type: "audio/wav",
+        size: 4,
+        url: `https://bridge.example/media/${id}`,
+        expires_at_ms: NOW + 60_000,
+        duration_ms: 1_200,
+        error: null,
+      },
+    ],
+    quote: null,
+    history: [],
+    context_token: null,
+    chat_type: "direct",
+    reply: {
+      method: "POST",
+      url: "https://bridge.example/send",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer <BRIDGE_TOKEN>" },
+      body: { to: "owner@im.wechat", text: "<reply text>", context_token: null, account: "bot@im.wechat" },
+      notes: "",
+    },
+  };
 }
 
 function cookieValue(header: string): string {
