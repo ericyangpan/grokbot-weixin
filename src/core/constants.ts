@@ -129,3 +129,14 @@ export const MAX_HISTORY_TTL_MS = 30 * 24 * 60 * 60_000;
 
 /** Reply sent on WeChat when the user clears history. Not stored in the transcript. */
 export const HISTORY_RESET_ACK = "Started a new conversation.";
+
+/** How long a history view link and its cookie stay valid. Default 15 minutes. */
+export const DEFAULT_HISTORY_VIEW_TTL_MS = 15 * 60_000;
+
+export const MIN_HISTORY_VIEW_TTL_MS = 60_000;
+
+/** Hard cap so a view session cannot be configured past half an hour. */
+export const MAX_HISTORY_VIEW_TTL_MS = 30 * 60_000;
+
+/** Outstanding one-shot codes and view cookies kept at once. */
+export const MAX_HISTORY_VIEW_GRANTS = 8;

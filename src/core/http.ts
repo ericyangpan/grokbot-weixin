@@ -1,4 +1,4 @@
-import { isAuthorized, isPeerId, timingSafeEqual } from "./auth.js";
+import { isAuthorized, isPeerId, readCookie, timingSafeEqual } from "./auth.js";
 import type { BridgeApp } from "./app.js";
 import { appNow } from "./app.js";
 import { BODY_MAX_BYTES, QR_LOGIN_TTL_MS, QR_STATUS_TIMEOUT_MS, SEND_TEXT_MAX, VERSION } from "./constants.js";
@@ -7,6 +7,17 @@ import { advanceQrLogin, beginQrLogin, type QrLoginSession } from "./login.js";
 import { renderLoginApp, renderTokenForm } from "./login-page.js";
 import { logWarn, publicError } from "./log.js";
 import { contentDisposition, loadStoredMedia } from "./media.js";
+import {
+  HISTORY_COOKIE,
+  historySessionCookie,
+  mintHistoryView,
+  peerForHistoryCookie,
+  redeemHistoryCode,
+  redactRequestPath,
+  renderHistoryDenied,
+  renderHistoryDocument,
+  sweepHistoryViews,
+} from "./history-view.js";
 import { persistConfirmedLogin } from "./persist.js";
 import { qrSvg } from "./qr.js";
 import { readAllowlist, readSession, localBotTokens, writeAllowlist } from "./state.js";
@@ -22,6 +33,9 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "GET" && path === "/health") return json(await healthReport(app));
     if (request.method === "GET" && path === "/login") return loginPage(request, app);
     if (request.method === "POST" && path === "/login/session") return loginSession(request, app);
+    if (request.method === "GET" && path === "/history") return historyPage(request, app);
+    const viewCode = historyCodeFromPath(path);
+    if (request.method === "GET" && viewCode) return redeemHistoryLink(request, app, viewCode);
     if (!(await isAuthorized(request, app.config.bridgeToken))) return json({ ok: false, error: "unauthorized" }, 401);
     if (request.method === "POST" && path === "/login/start") return loginStart(request, app, url);
     if (request.method === "GET" && path === "/login/status") return loginStatus(app);
@@ -29,12 +43,13 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "POST" && path === "/admin/session") return adminSession(request, app);
     if (request.method === "POST" && path === "/admin/allowlist") return adminAllowlist(request, app);
     if (request.method === "POST" && path === "/send") return send(request, app);
+    if (request.method === "POST" && path === "/history/session") return historySession(request, app);
     const mediaId = mediaIdFromPath(path);
     if (request.method === "GET" && mediaId) return serveMedia(app, mediaId);
     return json({ ok: false, error: "not_found" }, 404);
   } catch (err) {
     if (err instanceof HttpError) return json({ ok: false, error: err.code }, err.status);
-    logWarn("http_failed", { path, error: publicError(err) });
+    logWarn("http_failed", { path: redactRequestPath(path), error: publicError(err) });
     return json({ ok: false, error: "internal" }, 500);
   }
 }
@@ -227,6 +242,110 @@ async function send(request: Request, app: BridgeApp): Promise<Response> {
     client_id: result.clientId,
     ...(result.messageId ? { message_id: result.messageId } : {}),
     context_token_missing: result.contextTokenMissing,
+  });
+}
+
+/**
+ * Mint a view session. The JSON `url` is a one-shot path for WeChat.
+ * The Set-Cookie is for the HTTP client that called this route. Neither value is the bridge token.
+ */
+async function historySession(request: Request, app: BridgeApp): Promise<Response> {
+  const body = await readOptionalJson(request);
+  const requested = typeof body.peer === "string" ? body.peer.trim() : "";
+  const resolved = await resolveViewPeer(app, requested);
+  if ("error" in resolved) return json({ ok: false, error: resolved.error }, resolved.status);
+  if (!app.config.bridgePublicUrl) return json({ ok: false, error: "public_url_missing" }, 409);
+  const minted = await mintHistoryView(app, resolved.peer);
+  const url = `${app.config.bridgePublicUrl}/history/r/${minted.code}`;
+  const maxAge = Math.ceil(app.config.historyViewTtlMs / 1000);
+  return new Response(JSON.stringify({ ok: true, url, expires_at_ms: minted.expiresAtMs }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "Set-Cookie": historySessionCookie(minted.sessionSecret, maxAge, requestIsSecure(request)),
+    },
+  });
+}
+
+/** Spend a path code, set the view cookie, and leave the code out of the next URL. */
+async function redeemHistoryLink(request: Request, app: BridgeApp, code: string): Promise<Response> {
+  const redeemed = await redeemHistoryCode(app, code);
+  if (!redeemed) return historyHtml(renderHistoryDenied(), 404, requestIsSecure(request));
+  const maxAge = Math.max(1, Math.ceil((redeemed.expiresAtMs - appNow(app)) / 1000));
+  return new Response(null, {
+    status: 303,
+    headers: {
+      Location: "/history",
+      "Set-Cookie": historySessionCookie(redeemed.sessionSecret, maxAge, requestIsSecure(request)),
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Robots-Tag": "noindex",
+    },
+  });
+}
+
+/** Render the transcript for a live view cookie. Bearer auth is not accepted here. */
+async function historyPage(request: Request, app: BridgeApp): Promise<Response> {
+  await sweepHistoryViews(app);
+  const secret = readCookie(request.headers.get("Cookie"), HISTORY_COOKIE);
+  const session = await peerForHistoryCookie(app, secret);
+  if (!session) return historyHtml(renderHistoryDenied(), 401, requestIsSecure(request));
+  const htmlBody = await renderHistoryDocument(app, session.peer, session.expiresAtMs);
+  return historyHtml(htmlBody, 200, requestIsSecure(request));
+}
+
+async function resolveViewPeer(
+  app: BridgeApp,
+  requested: string,
+): Promise<{ peer: string } | { error: string; status: number }> {
+  const allow = await readAllowlist(app.storage);
+  if (!requested) {
+    if (allow.length !== 1 || !allow[0]) return { error: "peer_required", status: 400 };
+    return { peer: allow[0] };
+  }
+  if (allow.includes(requested)) return { peer: requested };
+  if (!isPeerId(requested)) return { error: "bad_request", status: 400 };
+  return { error: "not_allowlisted", status: 403 };
+}
+
+async function readOptionalJson(request: Request): Promise<Record<string, unknown>> {
+  const raw = await readLimited(request);
+  if (raw.trim() === "") return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new HttpError(400, "bad_request");
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(400, "bad_request");
+  }
+}
+
+function historyCodeFromPath(path: string): string | null {
+  const match = /^\/history\/r\/([0-9a-f]{64})$/.exec(path);
+  return match?.[1] ?? null;
+}
+
+function requestIsSecure(request: Request): boolean {
+  return new URL(request.url).protocol === "https:";
+}
+
+function historyHtml(body: string, status: number, secure: boolean): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Robots-Tag": "noindex",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+      ...(secure ? { "Strict-Transport-Security": "max-age=31536000" } : {}),
+    },
   });
 }
 

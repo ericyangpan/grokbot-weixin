@@ -34,6 +34,7 @@ export interface Env {
   HISTORY_MAX_CHARS?: string;
   HISTORY_TTL_MS?: string;
   HISTORY_RESET?: string;
+  HISTORY_VIEW_TTL_MS?: string;
 }
 
 /** Copy string bindings into the core env map. The Durable Object namespace is not included. */
@@ -70,6 +71,7 @@ export function workerEnvRecord(env: Env): EnvMap {
     HISTORY_MAX_CHARS: env.HISTORY_MAX_CHARS,
     HISTORY_TTL_MS: env.HISTORY_TTL_MS,
     HISTORY_RESET: env.HISTORY_RESET,
+    HISTORY_VIEW_TTL_MS: env.HISTORY_VIEW_TTL_MS,
   };
 }
 

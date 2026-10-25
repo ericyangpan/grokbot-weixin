@@ -7,17 +7,20 @@ import {
   DEFAULT_HISTORY_MAX_CHARS,
   DEFAULT_HISTORY_MAX_TURNS,
   DEFAULT_HISTORY_TTL_MS,
+  DEFAULT_HISTORY_VIEW_TTL_MS,
   DEFAULT_MEDIA_MAX_BYTES,
   DEFAULT_MEDIA_TOTAL_BYTES,
   DEFAULT_MEDIA_TTL_MS,
   MAX_HISTORY_MAX_CHARS,
   MAX_HISTORY_MAX_TURNS,
   MAX_HISTORY_TTL_MS,
+  MAX_HISTORY_VIEW_TTL_MS,
   MAX_LONG_POLL_MS,
   MAX_MEDIA_MAX_BYTES,
   MAX_MEDIA_TOTAL_BYTES,
   MAX_MEDIA_TTL_MS,
   MIN_HISTORY_TTL_MS,
+  MIN_HISTORY_VIEW_TTL_MS,
   MIN_LONG_POLL_MS,
   MIN_MEDIA_MAX_BYTES,
   MIN_MEDIA_TTL_MS,
@@ -67,6 +70,8 @@ export interface BridgeConfig {
   historyTtlMs: number;
   /** When true, a lone /new or /reset clears history and is not forwarded. */
   historyReset: boolean;
+  /** Lifetime of a history view link and the cookie it redeems into. */
+  historyViewTtlMs: number;
 }
 
 /** Optional credentials used to seed storage when it is empty. */
@@ -126,6 +131,12 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
     historyMaxChars: intEnv(env.HISTORY_MAX_CHARS, DEFAULT_HISTORY_MAX_CHARS, 0, MAX_HISTORY_MAX_CHARS),
     historyTtlMs: intEnv(env.HISTORY_TTL_MS, DEFAULT_HISTORY_TTL_MS, MIN_HISTORY_TTL_MS, MAX_HISTORY_TTL_MS),
     historyReset: boolEnv(env.HISTORY_RESET, true),
+    historyViewTtlMs: intEnv(
+      env.HISTORY_VIEW_TTL_MS,
+      DEFAULT_HISTORY_VIEW_TTL_MS,
+      MIN_HISTORY_VIEW_TTL_MS,
+      MAX_HISTORY_VIEW_TTL_MS,
+    ),
   };
 }
 

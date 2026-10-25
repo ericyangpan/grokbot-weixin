@@ -97,6 +97,19 @@ export async function rememberOutbound(
   }
 }
 
+/**
+ * Read the bounded transcript for one peer. Null means storage could not be read.
+ * Does not write, so a viewer cannot erase history.
+ */
+export async function loadPeerHistory(app: BridgeApp, peerId: string): Promise<HistoryTurn[] | null> {
+  try {
+    return await withPeerLock(peerId, () => readOrKeep(app, peerId, appNow(app), limitsFrom(app)));
+  } catch (err) {
+    logWarn("history_read_failed", { error: publicError(err) });
+    return null;
+  }
+}
+
 /** Delete the stored transcript for one peer. Storage errors are logged. */
 export async function clearPeerHistory(app: BridgeApp, peerId: string): Promise<void> {
   try {

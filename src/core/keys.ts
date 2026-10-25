@@ -12,4 +12,5 @@ export const KEYS = {
   rateSend: "rate_send",
   notifyStarted: "notify_started",
   pollFailures: "poll_failures",
+  historyViews: "history_views",
 } as const;

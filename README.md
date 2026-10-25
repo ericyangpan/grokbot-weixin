@@ -35,6 +35,7 @@ sequenceDiagram
 - `POST /send` protected by a bearer token (SHA-256 then constant-time compare) and a sliding one-minute rate limit.
 - Inbound images, voice, files, and video. The bridge downloads the iLink CDN object, decrypts it with AES-128-ECB and PKCS#7 (the same transform as openclaw-weixin), and keeps the plaintext until `MEDIA_TTL_MS`. The webhook event carries `GET /media/:id`, the mime type, and the size. That GET uses the same bearer token as `/send`.
 - A per-sender transcript of recent inbound messages and successful outbound texts, included on each webhook as `history`. A message whose whole text is `/new` or `/reset` clears that transcript and is not forwarded.
+- A private history page. `POST /history/session` with the bridge bearer token returns a one-shot link. Opening it sets an HttpOnly cookie and redirects to `/history`, which renders the stored transcript.
 
 Voice notes copy `voice_item.text` into `text` when the message has no typed text, and always into `media[].transcript`. The Node runner transcodes SILK to WAV when decoding succeeds. The Worker stores the raw SILK bytes (`audio/silk`) and still forwards the transcript. A quoted message is attached as `quote`.
 
@@ -90,6 +91,7 @@ Copy `.env.example` to `.env` for the Node runner. On Cloudflare, non-secrets ca
 | `HISTORY_MAX_CHARS` | `12000` | Budget for stored text plus media summaries and quote text. Clamped to 0–48000. `0` disables history. |
 | `HISTORY_TTL_MS` | `86400000` | Drop turns older than this (24 hours). Clamped to 1 minute–30 days. |
 | `HISTORY_RESET` | `true` | When `true`, a message whose entire text is `/new` or `/reset` clears that sender's history, sends a short confirmation on WeChat, and is not forwarded. |
+| `HISTORY_VIEW_TTL_MS` | `900000` | Lifetime of a history link and the cookie it redeems into (15 minutes). Clamped to 1–30 minutes. |
 | `GROKBOT_STATE_DIR` | `~/.grokbot-weixin` | Node only. Media files go in `media/` under this directory. History is one file per sender in the state directory. |
 
 Generate a bridge token with `openssl rand -base64 32`.
@@ -255,6 +257,13 @@ Keep the reply as plain text under 4000 characters.
 
 Stay silent when no reply is needed: do not call /send, and do not send a placeholder.
 Ignore events whose sender is unexpected. Do not invent a different recipient.
+
+When they ask to read the conversation on a page, mint a link and send only that URL.
+POST {origin}/history/session where origin is reply.url without the /send suffix.
+Authorization is "Bearer" plus the BRIDGE_TOKEN secret. Never print that token, and never put it in a URL.
+Body {} when one sender is allowlisted, or {"peer": reply.body.to} when you must name one.
+The JSON is {"ok":true,"url":"https://.../history/r/<code>","expires_at_ms":...}.
+Send url to the user. The code works once, then the browser keeps a short-lived cookie. The link stops working at expires_at_ms.
 ```
 
 `POST /send` body is `{ "to"?, "text", "context_token"?, "account"? }`. `to` is optional when the allowlist has exactly one sender; the bridge delivers to that stored id and does not return it. The id is whatever pinning saved (`from_user_id`), including values outside the printable-ASCII check. If `to` is omitted and the allowlist is empty or has more than one entry, the response is HTTP 400 `recipient_required`. An explicit `to` that is already allowlisted is sent as given. Any other explicit `to` must be a single-line visible id or the response is HTTP 400 `bad_request`; a well-formed id that is not allowlisted is HTTP 403. `account` must match the logged-in bot id when present. `context_token` is optional; the bridge uses the newest token stored for that sender. HTTP 409 `context_token_rejected` means iLink returned `ret: -2`. HTTP 429 means the rate limit fired.
@@ -303,7 +312,7 @@ You can also set `BRIDGE_PUBLIC_URL` under `[vars]` in `wrangler.toml` if you pr
 
 Inbound media does not add a secret, a binding, or an R2 bucket. `wrangler.toml` stays as it is. Decrypted bytes live in the account Durable Object until `MEDIA_TTL_MS` (default 15 minutes). Optional `MEDIA_TTL_MS`, `MEDIA_MAX_BYTES`, and `MEDIA_MAX_TOTAL_BYTES` can be `[vars]` when the defaults are wrong. `BRIDGE_PUBLIC_URL` must be set or each media object is stored nowhere and `error` is `public_url_missing`.
 
-Conversation history uses that same Durable Object key-value table. It adds no secret and no binding. Optional `[vars]` are `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, `HISTORY_TTL_MS`, and `HISTORY_RESET`.
+Conversation history uses that same Durable Object key-value table. It adds no secret and no binding. Optional `[vars]` are `HISTORY_MAX_TURNS`, `HISTORY_MAX_CHARS`, `HISTORY_TTL_MS`, `HISTORY_RESET`, and `HISTORY_VIEW_TTL_MS`.
 
 Login, pick one:
 
@@ -392,7 +401,7 @@ grokbot-weixin allow <id>
 grokbot-weixin export-session --out <file>
 ```
 
-`login` prints a Unicode QR and the URL encoded in it. Default wait is 8 minutes. The bot token is stored under the state directory and is not printed. `start` serves `/health`, `/login`, `/send`, and `/admin/*` on `127.0.0.1:8787` and runs the poll loop until SIGINT or SIGTERM. `send` does not apply the HTTP rate limit. `allow` appends one sender id. `export-session` writes a mode `0600` JSON file for `POST /admin/session`.
+`login` prints a Unicode QR and the URL encoded in it. Default wait is 8 minutes. The bot token is stored under the state directory and is not printed. `start` serves `/health`, `/login`, `/send`, `/history`, and `/admin/*` on `127.0.0.1:8787` and runs the poll loop until SIGINT or SIGTERM. `send` does not apply the HTTP rate limit. `allow` appends one sender id. `export-session` writes a mode `0600` JSON file for `POST /admin/session`.
 
 ## HTTP API
 
@@ -408,6 +417,9 @@ grokbot-weixin export-session --out <file>
 | `POST /admin/allowlist` | bearer or cookie | Body `{ "allow_from": ["id"] }` (max 20). |
 | `POST /send` | bearer or cookie | Body `{ "to"?, "text", "context_token"?, "account"? }`. `to` is optional when exactly one sender is allowlisted. Text limit 8000 characters. |
 | `GET /media/:id` | bearer or cookie | Decrypted inbound bytes. `id` is 32 hex characters. 404 when the id is unknown or `expires_at_ms` has passed. Not counted by the `/send` rate limit. |
+| `POST /history/session` | bearer or login cookie | Mints a history view. Body `{ "peer"? }`. `peer` is optional when the allowlist has one sender; otherwise it is required and must be allowlisted. Response `{ "ok": true, "url", "expires_at_ms" }` plus `Set-Cookie`. `url` is `{BRIDGE_PUBLIC_URL}/history/r/<64 hex>` with no query string. `expires_at_ms` is when that code and the cookie minted by this response stop working. HTTP 409 `public_url_missing` when `BRIDGE_PUBLIC_URL` is empty. The response does not include the peer id. |
+| `GET /history/r/:code` | one-shot code | Redeems the code, sets cookie `gb_hist` (`HttpOnly`, `SameSite=Lax`, `Path=/history`, `Secure` on HTTPS), and `303` to `/history`. The code is deleted. A second GET, a bad code, or an expired code is 404 and shows no transcript. |
+| `GET /history` | `gb_hist` cookie | The transcript, oldest first: text, media kind, file name, and transcript. No media download URLs. `Cache-Control: private, no-store`. Missing, forged, or expired cookie is 401 and shows no transcript. `Authorization: Bearer BRIDGE_TOKEN` does not open this page. |
 
 Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie. Comparison hashes both strings with SHA-256 and compares the digests, so the check does not leak the secret's length. Values longer than 512 characters are rejected.
 
@@ -419,6 +431,7 @@ Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie
 - `/send` refuses peers that are not on the allowlist, including when you pass your own `to`.
 - The webhook event tells the model how to call `/send` and `GET /media/:id`, and uses a placeholder for the token. Put the real token in the routine secret, not in the prompt.
 - A media URL is not enough by itself. The id is random, the object expires, and the GET still requires `BRIDGE_TOKEN`.
+- `/history` is not public. The bearer token is not a page credential and is not placed in the URL. The one-shot code is single-use, stored only as a hash, and omitted from logs. The view cookie is `HttpOnly` and limited to `Path=/history`.
 - AES keys and CDN `encrypt_query_param` values are not written to the webhook or to logs. `full_url` is fetched only when it is public `https`.
 - Login QR responses returned to the browser omit the raw `qrcode` secret and the bot token. The SVG is generated locally from the QR URL.
 
@@ -450,7 +463,7 @@ npm run build
 
 `npm test` runs Vitest. `npm run build` typechecks the Node runner, typechecks the Worker, and runs `wrangler deploy --dry-run`.
 
-Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, file modes `0700` / `0600`, inbound media parsing, AES-128-ECB decryption, `GET /media/:id`, and conversation history (bounds, proactive sends, quotes, and `/reset`). The iLink server and the CDN are mock `fetch` handlers. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
+Tests cover header construction, the QR state machine, cursor persistence, dedupe, webhook retry, `/send` authentication, the allowlist, file modes `0700` / `0600`, inbound media parsing, AES-128-ECB decryption, `GET /media/:id`, conversation history (bounds, proactive sends, quotes, and `/reset`), and the history page (mint, cookie expiry, and unauthenticated rejection). The iLink server and the CDN are mock `fetch` handlers. A live QR scan, a live `getupdates` session, and a live Grok Bot routine were not run.
 
 ## 中文说明
 
@@ -471,6 +484,8 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 图片、文件和视频会先下载并解密，再放进 Durable Object（Node 则是 `$GROKBOT_STATE_DIR/media`）。事件里的 `media[].url` 是 `GET /media/:id`，要用同一个 `BRIDGE_TOKEN`，并在 `expires_at_ms` 之前取走。语音如果带了 `voice_item.text`，会出现在 `text` 和 `media[].transcript`。Cloudflare 上语音文件是原始 SILK（`audio/silk`）；Node 和 Docker 会尽量转成 WAV。引用消息在 `quote` 里，结构与正文附件相同。不需要新建 R2 bucket，也不用改 `wrangler.toml`。
 
 每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。历史读写失败不会把已经发给微信的消息报成失败，也不会少发或多发 webhook。
+
+要在网页上看对话：routine 用 `BRIDGE_TOKEN` 调用 `POST /history/session`，只把返回的 `url` 发给用户。那个地址里的码只能用一次，打开后变成 HttpOnly cookie 并跳到 `/history`。默认 15 分钟过期，上限 30 分钟（`HISTORY_VIEW_TTL_MS`）。不要把 `BRIDGE_TOKEN` 放进链接。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 
