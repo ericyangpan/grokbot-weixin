@@ -1,11 +1,15 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { bufferedAccountBody, isHistoryRoute, requestForAccount } from "../src/core/account-request.js";
 import { configFromEnv } from "../src/core/config.js";
-import { handleBridgeRequest } from "../src/core/http.js";
+import { HISTORY_PAGE_CSP, handleBridgeRequest } from "../src/core/http.js";
+import { historyPlayerSource, HISTORY_SILK_RATE } from "../src/core/history-player.js";
 import { historyStorageKey, loadPeerHistory, rememberInbound } from "../src/core/history.js";
 import { redactRequestPath } from "../src/core/history-view.js";
+import { pcmToWav } from "../src/core/media.js";
 import { writeAllowlist } from "../src/core/state.js";
+import "../src/node/silk-assets.js";
 import { makeApp } from "./support.js";
 import type { BridgeApp } from "../src/core/app.js";
 import type { InboundEvent } from "../src/core/types.js";
@@ -45,7 +49,8 @@ describe("history view", () => {
       expect(directHtml).toContain("Oldest first");
       expect(directHtml).toContain("seven thirty");
       expect(directHtml).toContain("plans");
-      expect(directHtml).not.toContain("<script>");
+      expect(directHtml).not.toContain("<script");
+      expect(directHtml).not.toContain("/history/player.js");
       expect(directHtml).toContain("&lt;script&gt;");
       expect(directHtml).not.toContain("Transcript:");
       expect(directHtml).not.toMatch(/https?:\/\//);
@@ -145,6 +150,8 @@ describe("history view", () => {
     expect(new URL(forwarded.url).pathname).toBe("/history/session");
     expect(new URL(forwarded.url).host).toBe("bridge.internal");
     expect(isHistoryRoute("/history/session")).toBe(true);
+    expect(isHistoryRoute("/history/player.js")).toBe(true);
+    expect(isHistoryRoute("/history/silk.wasm")).toBe(true);
     expect(isHistoryRoute("/send")).toBe(false);
 
     const minted = await handleBridgeRequest(forwarded, app);
@@ -166,7 +173,7 @@ describe("history view", () => {
     expect(await health.json()).toMatchObject({ ok: true, history_view: true });
   });
 
-  it("shows a voice transcript once and plays only browser audio that is still stored", async () => {
+  it("shows a voice transcript once and plays stored audio, including SILK in the page", async () => {
     const app = viewApp();
     await writeAllowlist(app.storage, ["owner@im.wechat"]);
     const put = (mimeType: string, fileName: string, bytes: number[]) =>
@@ -235,13 +242,21 @@ describe("history view", () => {
     expect(times(html, "too late")).toBe(1);
     expect(html).not.toContain("Transcript:");
     expect(html).toContain(`<audio controls preload="none" src="/history/media/${wav.id}"></audio>`);
+    expect(html).toContain(`<button type="button" class="play" data-silk="/history/media/${silk.id}">Play voice</button>`);
+    expect(html).toContain('<script type="module" src="/history/player.js"></script>');
     expect(html).toContain(`<img src="/history/media/${image.id}" alt="photo.jpg">`);
     expect(html).toContain("Voice message");
     expect(html).not.toContain("audio/silk");
-    expect(html).not.toContain(silk.id);
+    expect(html).not.toContain(`src="/history/media/${silk.id}"`);
     expect(html).not.toContain(gone.id);
     expect(html).not.toContain(TOKEN);
+    expect(html).not.toContain("Transcript:");
     expect(html.match(/<audio /g)?.length ?? 0).toBe(1);
+    expect(page.headers.get("content-security-policy")).toBe(HISTORY_PAGE_CSP);
+    expect(HISTORY_PAGE_CSP).toContain("script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'");
+    expect(HISTORY_PAGE_CSP).toContain("connect-src 'self'");
+    expect(HISTORY_PAGE_CSP).toContain("media-src 'self' blob:");
+    expect(HISTORY_PAGE_CSP).not.toContain("http");
 
     const audio = await handleBridgeRequest(historyRequest(secret, `/history/media/${wav.id}`), app);
     expect(audio.status).toBe(200);
@@ -256,6 +271,59 @@ describe("history view", () => {
     const stranger = await handleBridgeRequest(historyRequest(secret, `/history/media/${"ab".repeat(16)}`), app);
     expect(stranger.status).toBe(404);
     expect(await stranger.text()).not.toContain("seven thirty");
+
+    const player = await handleBridgeRequest(historyRequest(secret, "/history/player.js"), app);
+    expect(player.status).toBe(200);
+    expect(player.headers.get("content-type")).toContain("text/javascript");
+    const playerJs = await player.text();
+    expect(playerJs).toBe(historyPlayerSource());
+    expect(playerJs).toContain(`const RATE = ${HISTORY_SILK_RATE};`);
+    expect(playerJs).toContain('credentials: "same-origin"');
+    expect(playerJs).toContain('from "/history/silk.js"');
+    expect(playerJs).toContain("Could not play");
+    expect(playerJs).not.toContain(TOKEN);
+    expect(playerJs).not.toContain("Authorization");
+
+    const glue = await handleBridgeRequest(historyRequest(secret, "/history/silk.js"), app);
+    expect(glue.status).toBe(200);
+    expect(glue.headers.get("content-type")).toContain("text/javascript");
+    const glueJs = await glue.text();
+    expect(glueJs).toContain("export{decode");
+    expect(glueJs).not.toContain(TOKEN);
+
+    const wasm = await handleBridgeRequest(historyRequest(secret, "/history/silk.wasm"), app);
+    expect(wasm.status).toBe(200);
+    expect(wasm.headers.get("content-type")).toContain("application/wasm");
+    const wasmBytes = new Uint8Array(await wasm.arrayBuffer());
+    expect(String.fromCharCode(...wasmBytes.subarray(0, 4))).toBe("\0asm");
+    expect(wasm.headers.get("cache-control")).toContain("no-store");
+
+    const assetAnon = await handleBridgeRequest(new Request("https://bridge.example/history/silk.wasm"), app);
+    expect(assetAnon.status).toBe(401);
+    const assetBearer = await handleBridgeRequest(
+      new Request("https://bridge.example/history/player.js", { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      app,
+    );
+    expect(assetBearer.status).toBe(401);
+    expect(await assetBearer.text()).not.toContain("decode");
+  });
+
+  it("wraps browser SILK playback PCM without decoding on the Worker poll path", async () => {
+    const samples = new Int16Array(240);
+    for (let i = 0; i < samples.length; i += 1) samples[i] = Math.round(Math.sin(i / 8) * 8_000);
+    const silk = await (await import("silk-wasm")).encode(samples, HISTORY_SILK_RATE);
+    const decoded = await (await import("silk-wasm")).decode(silk.data, HISTORY_SILK_RATE);
+    expect(decoded.data.byteLength).toBeGreaterThan(0);
+    const wav = pcmToWav(decoded.data, HISTORY_SILK_RATE);
+    expect(String.fromCharCode(...wav.subarray(0, 4))).toBe("RIFF");
+    expect(new DataView(wav.buffer, wav.byteOffset, wav.byteLength).getUint32(24, true)).toBe(HISTORY_SILK_RATE);
+
+    const account = readFileSync(new URL("../src/worker/account-do.ts", import.meta.url), "utf8");
+    const poll = readFileSync(new URL("../src/core/poll.ts", import.meta.url), "utf8");
+    expect(account).not.toContain("decodeSilk");
+    expect(account).not.toContain('from "silk-wasm"');
+    expect(poll).not.toContain("silk-wasm");
+    expect(poll).not.toContain("decodeSilk");
   });
 
   it("stores a media id on history without keeping the download url", async () => {

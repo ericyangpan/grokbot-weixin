@@ -19,6 +19,7 @@ import {
   renderHistoryDocument,
   sweepHistoryViews,
 } from "./history-view.js";
+import { historyAssetBody, historyAssetName, historyAssetType } from "./history-assets.js";
 import { loadPeerHistory } from "./history.js";
 import { persistConfirmedLogin } from "./persist.js";
 import { qrSvg } from "./qr.js";
@@ -38,6 +39,8 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "GET" && path === "/history") return historyPage(request, app);
     const historyMediaId = historyMediaIdFromPath(path);
     if (request.method === "GET" && historyMediaId) return historyMedia(request, app, historyMediaId);
+    const assetName = historyAssetName(path);
+    if (request.method === "GET" && assetName) return historyAsset(request, app, assetName);
     const viewCode = historyCodeFromPath(path);
     if (request.method === "GET" && viewCode) return redeemHistoryLink(request, app, viewCode);
     if (!(await isAuthorized(request, app.config.bridgeToken))) return json({ ok: false, error: "unauthorized" }, 401);
@@ -345,6 +348,22 @@ function requestIsSecure(request: Request): boolean {
   return new URL(request.url).protocol === "https:";
 }
 
+/**
+ * History pages only. `unsafe-eval` is for silk-wasm's embind (`new Function`).
+ * `wasm-unsafe-eval` is for `WebAssembly.instantiate` in that same file.
+ * Scripts, wasm, and fetches stay on this origin. No inline script, no CDN.
+ */
+export const HISTORY_PAGE_CSP = [
+  "default-src 'none'",
+  "img-src 'self'",
+  "media-src 'self' blob:",
+  "style-src 'unsafe-inline'",
+  "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
 function historyHtml(body: string, status: number, secure: boolean): Response {
   return new Response(body, {
     status,
@@ -354,8 +373,33 @@ function historyHtml(body: string, status: number, secure: boolean): Response {
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
       "X-Robots-Tag": "noindex",
-      "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+      "Content-Security-Policy": HISTORY_PAGE_CSP,
       ...(secure ? { "Strict-Transport-Security": "max-age=31536000" } : {}),
+    },
+  });
+}
+
+/** Player, glue, or wasm. The view cookie is required. The bridge token is not. */
+async function historyAsset(
+  request: Request,
+  app: BridgeApp,
+  name: NonNullable<ReturnType<typeof historyAssetName>>,
+): Promise<Response> {
+  await sweepHistoryViews(app);
+  const secret = readCookie(request.headers.get("Cookie"), HISTORY_COOKIE);
+  const session = await peerForHistoryCookie(app, secret);
+  if (!session) return json({ ok: false, error: "unauthorized" }, 401);
+  const body = historyAssetBody(name);
+  if (!body) return json({ ok: false, error: "not_found" }, 404);
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": historyAssetType(name),
+      "Content-Length": String(body.byteLength),
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Robots-Tag": "noindex",
     },
   });
 }

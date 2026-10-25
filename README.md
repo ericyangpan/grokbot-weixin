@@ -37,7 +37,7 @@ sequenceDiagram
 - A per-sender transcript of recent inbound messages and successful outbound texts, included on each webhook as `history`. A message whose whole text is `/new` or `/reset` clears that transcript and is not forwarded.
 - A private history page. `POST /history/session` with the bridge bearer token returns a one-shot link. Opening it sets an HttpOnly cookie and redirects to `/history`, which renders the stored transcript.
 
-Voice notes copy `voice_item.text` into `text` when the message has no typed text, and always into `media[].transcript`. The Node runner transcodes SILK to WAV when decoding succeeds. The Worker stores the raw SILK bytes (`audio/silk`) and still forwards the transcript. A quoted message is attached as `quote`.
+Voice notes copy `voice_item.text` into `text` when the message has no typed text, and always into `media[].transcript`. The Node runner transcodes SILK to WAV when decoding succeeds. The Worker stores the raw SILK bytes (`audio/silk`) and still forwards the transcript. The history page plays that SILK in the browser. A quoted message is attached as `quote`.
 
 Upstream's channel metadata describes this API as direct messages only (`chatTypes: ["direct"]`, group policy disabled). Messages that carry `group_id` are ignored. Bot echoes (`message_type` 2, or `from_user_id` equal to the account id) are ignored.
 
@@ -46,7 +46,7 @@ Upstream's channel metadata describes this API as direct messages only (`chatTyp
 | Path | Role |
 | --- | --- |
 | `src/core` | iLink client, QR state machine, one poll step, webhook, `/send`, `GET /media/:id`, AES-128-ECB, login page. Uses `fetch`, Web Crypto, and injected storage. |
-| `src/worker` | Cloudflare Worker plus one SQLite Durable Object named `owner`. An alarm runs one poll, writes state, stores decrypted media in that same database, and reschedules. |
+| `src/worker` | Cloudflare Worker plus one SQLite Durable Object named `owner`. An alarm runs one poll, writes state, stores decrypted media in that same database, and reschedules. The poll does not decode SILK. |
 | `src/node` | Node.js 22 CLI. State files live in `~/.grokbot-weixin/` (directory `0700`, files `0600`). Decrypted media is under `media/`. SILK voice is decoded with `silk-wasm`. |
 | `test` | Vitest against an in-memory iLink fetch mock. |
 
@@ -86,7 +86,7 @@ Copy `.env.example` to `.env` for the Node runner. On Cloudflare, non-secrets ca
 | `MEDIA_TTL_MS` | `900000` | How long `GET /media/:id` keeps working. Clamped to 1 minute–24 hours. |
 | `MEDIA_MAX_BYTES` | `10485760` | Largest decrypted object stored (10 MiB). Clamped to 64 KiB–32 MiB. |
 | `MEDIA_MAX_TOTAL_BYTES` | `67108864` | Total decrypted bytes kept at once (64 MiB). Oldest objects are deleted first. Raised to at least `MEDIA_MAX_BYTES`, and clamped to 256 MiB. |
-| `MEDIA_TRANSCODE_VOICE` | `true` | On Node, try to store SILK voice as WAV. The Worker has no SILK decoder, so voice there stays `audio/silk`. |
+| `MEDIA_TRANSCODE_VOICE` | `true` | On Node, try to store SILK voice as WAV. The Worker does not decode SILK while ingesting, so voice there stays `audio/silk`. The history page can play that file in the browser. |
 | `HISTORY_MAX_TURNS` | `30` | Recent turns kept per sender. Clamped to 0–100. `0` disables history and deletes what was stored. |
 | `HISTORY_MAX_CHARS` | `12000` | Budget for stored text plus media summaries and quote text. Clamped to 0–48000. `0` disables history. |
 | `HISTORY_TTL_MS` | `86400000` | Drop turns older than this (24 hours). Clamped to 1 minute–30 days. |
@@ -218,7 +218,7 @@ The response body is the decrypted file. `Content-Type` is `mime_type`. Images, 
 
 Decryption matches openclaw-weixin. The CDN object is AES-128-ECB with PKCS#7 padding. Images prefer `image_item.aeskey` (32 hex characters), then `media.aes_key`. An image with a CDN locator and no key is stored as downloaded. Voice, files, and video require `media.aes_key`: base64 of 16 raw bytes, or base64 of a 32-character hex key. `full_url` is used when it is public `https`. Otherwise the bridge GETs `{ILINK_CDN_BASE}/download?encrypted_query_param=`. Private, loopback, and link-local hosts in `full_url` are not fetched.
 
-Voice `encode_type` 7 (or an MP3 bitstream) is stored as `audio/mpeg`. `encode_type` 1 (PCM) is wrapped as `audio/wav` on both runtimes. SILK (`encode_type` 6, or absent, which is the usual WeChat voice note) becomes `audio/wav` on the Node runner when `silk-wasm` decodes it. The Worker does not decode SILK: the file is `audio/silk` and the transcript is the text the routine should read. `encode_type` 5 is `audio/amr` and 8 is `audio/ogg`, unchanged.
+Voice `encode_type` 7 (or an MP3 bitstream) is stored as `audio/mpeg`. `encode_type` 1 (PCM) is wrapped as `audio/wav` on both runtimes. SILK (`encode_type` 6, or absent, which is the usual WeChat voice note) becomes `audio/wav` on the Node runner when `silk-wasm` decodes it. The Worker does not decode SILK on the poll path: the stored file is `audio/silk`, and the transcript is the text the routine should read. The history page decodes that SILK in the browser. `encode_type` 5 is `audio/amr` and 8 is `audio/ogg`, unchanged.
 
 `error: "no_key"` means voice, file, or video had a CDN locator and no usable AES key. The transcript is still set when WeChat sent one. `too_large` means the declared size or the downloaded object exceeded `MEDIA_MAX_BYTES`. `too_many` means the message had more than 8 downloadable attachments, counting the quote. `public_url_missing` means `BRIDGE_PUBLIC_URL` is empty, so no URL could be built and the bytes were not stored.
 
@@ -423,7 +423,8 @@ grokbot-weixin export-session --out <file>
 | `GET /media/:id` | bearer or cookie | Decrypted inbound bytes. `id` is 32 hex characters. 404 when the id is unknown or `expires_at_ms` has passed. Not counted by the `/send` rate limit. |
 | `POST /history/session` | bearer or login cookie | Mints a history view. Body `{ "peer"? }`. `peer` is optional when the allowlist has one sender; otherwise it is required and must be allowlisted. Response `{ "ok": true, "url", "expires_at_ms" }` plus `Set-Cookie`. `url` is `{BRIDGE_PUBLIC_URL}/history/r/<64 hex>` with no query string. `expires_at_ms` is when that code and the cookie minted by this response stop working. HTTP 409 `public_url_missing` when `BRIDGE_PUBLIC_URL` is empty. The response does not include the peer id. |
 | `GET /history/r/:code` | one-shot code | Redeems the code, sets cookie `gb_hist` (`HttpOnly`, `SameSite=Lax`, `Path=/history`, `Secure` on HTTPS), and `303` to `/history`. The code is deleted. A second GET, a bad code, or an expired code is 404 and shows no transcript. |
-| `GET /history` | `gb_hist` cookie | The transcript, oldest first. A voice note shows its WeChat transcript once, with an audio control when the stored file is still available and the browser can play it (such as WAV or MP3). SILK is not given a player. Images, video, and files are shown without a transcript label. `Cache-Control: private, no-store`. Missing, forged, or expired cookie is 401 and shows no transcript. `Authorization: Bearer BRIDGE_TOKEN` does not open this page. |
+| `GET /history` | `gb_hist` cookie | The transcript, oldest first. A voice note shows its WeChat transcript once. WAV or MP3 that is still stored uses an audio control. SILK that is still stored uses a same-origin player and is not decoded on the Worker. Images, video, and files are shown without a transcript label. `Cache-Control: private, no-store`. Missing, forged, or expired cookie is 401 and shows no transcript. `Authorization: Bearer BRIDGE_TOKEN` does not open this page. |
+| `GET /history/player.js`, `GET /history/silk.js`, `GET /history/silk.wasm` | `gb_hist` cookie | The history page's SILK player and the `silk-wasm` files it loads. Same origin, no CDN. 401 without the view cookie. The bridge token is not accepted and is not in these files. |
 | `GET /history/media/:id` | `gb_hist` cookie | Bytes for an object named in that peer's transcript. `id` is 32 hex characters. 401 without the view cookie, 404 when the id is absent from that transcript or the object has expired. The bridge token is not accepted. |
 
 Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie. Comparison hashes both strings with SHA-256 and compares the digests, so the check does not leak the secret's length. Values longer than 512 characters are rejected.
@@ -442,7 +443,7 @@ Authorization accepts `Authorization: Bearer <BRIDGE_TOKEN>` or the login cookie
 
 ## Known limits
 
-- Workers Free CPU is 10 ms. Waiting on `fetch` does not spend it. Duration headroom is small if anything else on the account is always on. AES decryption goes through Web Crypto. SILK decoding does not run on the Worker: a decode that overruns the CPU limit would cancel the poll. Voice on the Worker is `audio/silk` plus the transcript. Use the Node runner when the routine needs a WAV.
+- Workers Free CPU is 10 ms. Waiting on `fetch` does not spend it. Duration headroom is small if anything else on the account is always on. AES decryption goes through Web Crypto. SILK decoding does not run on the Worker poll: a decode that overruns the CPU limit would cancel the poll. Voice on the Worker is stored as `audio/silk` plus the transcript. The history page decodes that SILK in the browser. Use the Node runner when the routine needs a WAV download.
 - `MEDIA_MAX_BYTES` defaults to 10 MiB and cannot be set above 32 MiB. Larger files and videos come back as `error: "too_large"` with no bytes. On the Worker each stored object is about one SQLite row per 64 KB, and expiry deletes those rows. The Free plan allows 100,000 row writes per day, which covers a single user's photos and short voice notes. A long stretch of large videos can spend that budget.
 - `BRIDGE_PUBLIC_URL` has to be the internet origin. Without it, media `url` is null.
 - Conversation history is per sender and is not a model memory store. It keeps the last 30 turns, about 12,000 characters, and 24 hours, unless the `HISTORY_*` variables say otherwise. `/new` and `/reset` clear one sender. Media in history is a description; the bytes expire with `MEDIA_TTL_MS`.
@@ -490,7 +491,7 @@ Tests cover header construction, the QR state machine, cursor persistence, dedup
 
 每条 webhook 都带 `history`：这个发送者最近的对话，从旧到新，不含当前这条。`role` 为 `user` 是对方发来的，`assistant` 是桥成功发出去的文字（包含主动 `/send`）。默认保留 30 轮、约 12000 字、24 小时，可用 `HISTORY_MAX_TURNS`、`HISTORY_MAX_CHARS`、`HISTORY_TTL_MS` 调整。历史里的附件只有种类、文件名和转写，没有下载地址。用户单独发送 `/new` 或 `/reset` 会清空该发送者的历史，微信里收到一句确认，routine 不会收到这条命令。历史读写失败不会把已经发给微信的消息报成失败，也不会少发或多发 webhook。
 
-要在网页上看对话：routine 用 `BRIDGE_TOKEN` 调用 `POST /history/session`，只把返回的 `url` 发给用户。那个地址里的码只能用一次，打开后变成 HttpOnly cookie 并跳到 `/history`。默认 15 分钟过期，上限 30 分钟（`HISTORY_VIEW_TTL_MS`）。不要把 `BRIDGE_TOKEN` 放进链接。语音转写来自微信，页面上只出现一次；WAV、MP3 这类还能播放的录音会有一个播放器，SILK 不会假装能播。`/health` 里 `history_view` 为 true 时，说明当前进程带有这个页面。部署里的迁移 `v2` 把 Durable Object 类从 `AccountDurableObject` 改名为 `AccountDurableObjectV2`，SQLite 里的登录、白名单和历史跟着走，不用重新扫码。实例名仍是 `owner`。
+要在网页上看对话：routine 用 `BRIDGE_TOKEN` 调用 `POST /history/session`，只把返回的 `url` 发给用户。那个地址里的码只能用一次，打开后变成 HttpOnly cookie 并跳到 `/history`。默认 15 分钟过期，上限 30 分钟（`HISTORY_VIEW_TTL_MS`）。不要把 `BRIDGE_TOKEN` 放进链接。语音转写来自微信，页面上只出现一次。WAV、MP3 这类浏览器能直接播的录音用音频控件。Worker 仍把语音存成 SILK（`audio/silk`），历史页在浏览器里用 wasm 播放，轮询路径不解码。过期或没有媒体 id 时只显示转写。`/health` 里 `history_view` 为 true 时，说明当前进程带有这个页面。部署里的迁移 `v2` 把 Durable Object 类从 `AccountDurableObject` 改名为 `AccountDurableObjectV2`，SQLite 里的登录、白名单和历史跟着走，不用重新扫码。实例名仍是 `owner`。
 
 `npm test` 和 `npm run build` 只针对模拟的 iLink 服务和模拟 CDN。真实微信扫码无法在 CI 里完成。
 

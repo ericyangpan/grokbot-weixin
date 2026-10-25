@@ -1,4 +1,5 @@
 import { BODY_MAX_BYTES } from "./constants.js";
+import { historyAssetName } from "./history-assets.js";
 
 /** Thrown when a forwarded body is larger than the bridge accepts. */
 export class AccountBodyTooLarge extends Error {
@@ -42,6 +43,7 @@ export function isHistoryRoute(pathname: string): boolean {
   return (
     path === "/history" ||
     path === "/history/session" ||
+    historyAssetName(path) !== null ||
     /^\/history\/r\/[0-9a-f]{64}$/.test(path) ||
     /^\/history\/media\/[0-9a-f]{32}$/.test(path)
   );

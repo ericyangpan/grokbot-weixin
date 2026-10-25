@@ -174,7 +174,8 @@ function renderPage(peer: string, expiresAtMs: number, turns: HistoryTurn[] | nu
       .sort((left, right) => left.turn.at_ms - right.turn.at_ms || left.index - right.index);
     for (const item of ordered) body.push(renderTurn(item.turn, live));
   }
-  return document("Conversation", body.join(""));
+  const main = body.join("");
+  return document("Conversation", main, main.includes('data-silk="/history/media/'));
 }
 
 function renderTurn(turn: HistoryTurn, live: Map<string, string>): string {
@@ -214,6 +215,7 @@ function renderControl(item: HistoryMedia, live: Map<string, string>): string {
   const src = id && mime ? `/history/media/${id}` : null;
   if (item.kind === "voice") {
     if (src && playableAudio(mime)) return `<audio controls preload="none" src="${src}"></audio>`;
+    if (src) return `<button type="button" class="play" data-silk="${src}">Play voice</button>`;
     return `<p class="marker">Voice message</p>`;
   }
   if (item.kind === "image") {
@@ -280,7 +282,7 @@ async function liveMediaMimes(app: BridgeApp, turns: HistoryTurn[]): Promise<Map
   return live;
 }
 
-function document(title: string, main: string): string {
+function document(title: string, main: string, silkPlayer = false): string {
   return [
     "<!DOCTYPE html>",
     '<html lang="en"><head>',
@@ -302,10 +304,13 @@ function document(title: string, main: string): string {
     ".media,.quote{margin-top:.45rem;font-size:.9rem;color:#3f3f46}",
     ".marker{margin:.35rem 0}",
     "audio,video{display:block;width:100%;margin:.35rem 0}",
+    "button.play{font:inherit;margin:.35rem 0;padding:.35rem .75rem;border:1px solid #d4d4d8;border-radius:.5rem;background:#fff;color:#18181b}",
+    "button.play:disabled{opacity:.65}",
     "img{display:block;max-width:100%;height:auto;margin:.35rem 0;border-radius:.4rem}",
     "a{color:#1d4ed8}",
     "</style></head><body><main>",
     main,
+    silkPlayer ? '<script type="module" src="/history/player.js"></script>' : "",
     "</main></body></html>",
   ].join("");
 }

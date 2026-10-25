@@ -46,5 +46,20 @@ describe("Worker history view", () => {
     expect(text).not.toContain("test-token");
     expect(text).not.toContain("owner@im.wechat");
     expect(text).not.toContain("not_found");
-  }, 30_000);
+
+    const cookie = minted.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("gb_hist=");
+    const wasm = await worker.fetch("http://bridge.example/history/silk.wasm", { headers: { Cookie: cookie } });
+    expect(wasm.status).toBe(200);
+    expect(wasm.headers.get("content-type")).toContain("application/wasm");
+    const magic = new Uint8Array(await wasm.arrayBuffer());
+    expect(String.fromCharCode(...magic.subarray(0, 4))).toBe("\0asm");
+    const anon = await worker.fetch("http://bridge.example/history/silk.js");
+    expect(anon.status).toBe(401);
+    const bearer = await worker.fetch("http://bridge.example/history/player.js", {
+      headers: { Authorization: "Bearer test-token" },
+    });
+    expect(bearer.status).toBe(401);
+    expect(await bearer.text()).not.toContain("test-token");
+  }, 60_000);
 });

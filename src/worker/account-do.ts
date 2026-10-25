@@ -10,6 +10,7 @@ import { readSession } from "../core/state.js";
 import { DoMediaStore, ensureMediaSchema } from "./do-media.js";
 import { DoStorage } from "./do-storage.js";
 import { workerConfig, workerSeed, type Env } from "./env.js";
+import "./silk-assets.js";
 
 /**
  * One Durable Object owns the single WeChat account.

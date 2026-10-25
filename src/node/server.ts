@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import type { BridgeApp } from "../core/app.js";
+import "./silk-assets.js";
 import { BODY_MAX_BYTES } from "../core/constants.js";
 import { handleBridgeRequest } from "../core/http.js";
 import { logError, publicError } from "../core/log.js";
