@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { createIlinkClient, type BridgeApp } from "../core/app.js";
+import { redactRequestPath } from "../core/history-view.js";
 import { handleBridgeRequest } from "../core/http.js";
-import { logError, publicError } from "../core/log.js";
+import { logError, logInfo, publicError } from "../core/log.js";
 import { ensureSeeded } from "../core/persist.js";
 import { runPollStep } from "../core/poll.js";
 import { DoMediaStore, ensureMediaSchema } from "./do-media.js";
@@ -26,6 +27,20 @@ export class AccountDurableObject extends DurableObject<Env> {
 
   /** Proxy the bridge HTTP API onto this account. */
   override async fetch(request: Request): Promise<Response> {
+    return this.dispatch(request);
+  }
+
+  /**
+   * History routes call this over RPC. The path is the one the Worker built,
+   * not whatever `stub.fetch` would have rewritten it to.
+   */
+  async handleHttp(request: Request): Promise<Response> {
+    return this.dispatch(request);
+  }
+
+  private async dispatch(request: Request): Promise<Response> {
+    const path = requestPath(request);
+    logInfo("do_request", { method: request.method, path: redactRequestPath(path) });
     const app = this.createApp();
     await ensureSeeded(app, workerSeed(this.env));
     return handleBridgeRequest(request, app);
@@ -61,5 +76,13 @@ export class AccountDurableObject extends DurableObject<Env> {
         await this.ctx.storage.setAlarm(Date.now() + 200);
       },
     };
+  }
+}
+
+function requestPath(request: Request): string {
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return "/";
   }
 }

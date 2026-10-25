@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { isHistoryRoute, requestForAccount } from "../src/core/account-request.js";
 import { configFromEnv } from "../src/core/config.js";
 import { handleBridgeRequest } from "../src/core/http.js";
 import { historyStorageKey } from "../src/core/history.js";
@@ -128,6 +129,36 @@ describe("history view", () => {
     const missingUrl = await handleBridgeRequest(mintRequest(), unpublished);
     expect(missingUrl.status).toBe(409);
     expect(await unpublished.storage.get("history_views")).toBeNull();
+  });
+
+  it("routes a Durable Object request whose host is not the public origin", async () => {
+    const app = viewApp();
+    await seedHistory(app);
+    const incoming = mintRequest();
+    const forwarded = requestForAccount(incoming);
+    expect(forwarded.method).toBe("POST");
+    expect(new URL(forwarded.url).pathname).toBe("/history/session");
+    expect(new URL(forwarded.url).host).toBe("bridge.internal");
+    expect(isHistoryRoute("/history/session")).toBe(true);
+    expect(isHistoryRoute("/send")).toBe(false);
+
+    const minted = await handleBridgeRequest(forwarded, app);
+    expect(minted.status).toBe(200);
+    const body = (await minted.json()) as { url: string };
+    expect(body.url).toMatch(/^https:\/\/bridge\.example\/history\/r\/[0-9a-f]{64}$/);
+
+    const placeholder = await handleBridgeRequest(
+      new Request("https://fake-host/history/session", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: "{}",
+      }),
+      app,
+    );
+    expect(placeholder.status).toBe(200);
+
+    const health = await handleBridgeRequest(new Request("https://fake-host/health"), app);
+    expect(await health.json()).toMatchObject({ ok: true, history_view: true });
   });
 
   it("clamps the view ttl and redacts codes in request paths", () => {

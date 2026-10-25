@@ -46,6 +46,7 @@ export async function handleBridgeRequest(request: Request, app: BridgeApp): Pro
     if (request.method === "POST" && path === "/history/session") return historySession(request, app);
     const mediaId = mediaIdFromPath(path);
     if (request.method === "GET" && mediaId) return serveMedia(app, mediaId);
+    logWarn("http_not_found", { method: request.method, path: redactRequestPath(path) });
     return json({ ok: false, error: "not_found" }, 404);
   } catch (err) {
     if (err instanceof HttpError) return json({ ok: false, error: err.code }, err.status);
@@ -70,6 +71,7 @@ export async function healthReport(app: BridgeApp): Promise<Record<string, unkno
     paused_until: paused ? pauseUntil : null,
     webhook_configured: Boolean(app.config.webhookUrl),
     public_url_configured: Boolean(app.config.bridgePublicUrl),
+    history_view: true,
   };
 }
 
