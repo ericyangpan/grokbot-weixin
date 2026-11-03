@@ -1,4 +1,4 @@
-name = "wechat-ilink-deepseek"
+name = "grokbot-weixin"
 main = "src/worker/index.ts"
 compatibility_date = "2026-10-22"
 upload_source_maps = true
