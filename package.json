@@ -1,7 +1,7 @@
 {
   "name": "grokbot-weixin",
   "version": "0.1.0",
-  "description": "Bridge WeChat (Weixin) iLink bot messages to a Grok Bot routine webhook.",
+  "description": "WeChat (Weixin) iLink bot with direct DeepSeek replies on Cloudflare Workers.",
   "license": "MIT",
   "type": "module",
   "engines": {

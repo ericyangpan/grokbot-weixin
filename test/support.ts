@@ -28,7 +28,7 @@ export class MemoryStorage implements BridgeStorage {
 
 /** Record every fetch and answer from `handler`. */
 export function mockFetch(
-  handler: (request: CapturedRequest) => { status: number; body: string } | Promise<{ status: number; body: string }>,
+  handler: (request: CapturedRequest) => { status: number; body: string; headers?: Record<string, string> } | Promise<{ status: number; body: string; headers?: Record<string, string> }>,
 ): { fetchImpl: typeof fetch; calls: CapturedRequest[] } {
   const calls: CapturedRequest[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -43,7 +43,10 @@ export function mockFetch(
       throw error;
     }
     const result = await handler(captured);
-    return new Response(result.body, { status: result.status, headers: { "Content-Type": "application/json" } });
+    return new Response(result.body, {
+      status: result.status,
+      headers: { "Content-Type": "application/json", ...result.headers },
+    });
   };
   return { fetchImpl, calls };
 }
@@ -54,10 +57,9 @@ export function testConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig 
     ...configFromEnv({
       BRIDGE_TOKEN: "test-token",
       BRIDGE_PUBLIC_URL: "https://bridge.example",
-      GROK_WEBHOOK_URL: "https://routine.example/hook",
-      GROK_WEBHOOK_KEY: "whsec",
+      DEEPSEEK_API_KEY: "deepseek-test-key",
       ILINK_CHANNEL_VERSION: "0.1.0",
-      ILINK_BOT_AGENT: "GrokBotWeixin/0.1.0",
+      ILINK_BOT_AGENT: "WeixinDeepSeek/0.1.0",
       SEND_TYPING: "false",
     }),
     ...overrides,

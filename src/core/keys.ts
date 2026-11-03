@@ -13,4 +13,8 @@ export const KEYS = {
   notifyStarted: "notify_started",
   pollFailures: "poll_failures",
   historyViews: "history_views",
+  aiProvider: "ai_provider",
+  aiModel: "ai_model",
+  aiModelDeepseek: "ai_model_deepseek",
+  aiModelZhongdiwa: "ai_model_zhongdiwa",
 } as const;

@@ -76,7 +76,7 @@ export async function healthReport(app: BridgeApp): Promise<Record<string, unkno
     allowlist_count: allow.length,
     paused,
     paused_until: paused ? pauseUntil : null,
-    webhook_configured: Boolean(app.config.webhookUrl),
+    deepseek_configured: Boolean(app.config.deepseekApiKey),
     public_url_configured: Boolean(app.config.bridgePublicUrl),
     history_view: true,
   };
@@ -84,7 +84,12 @@ export async function healthReport(app: BridgeApp): Promise<Record<string, unkno
 
 async function loginPage(request: Request, app: BridgeApp): Promise<Response> {
   if (!(await isAuthorized(request, app.config.bridgeToken))) {
-    return html(renderTokenForm(), 200, false);
+    const sessionWasSet = new URL(request.url).searchParams.get("session") === "ok";
+    const sessionCookie = readCookie(request.headers.get("Cookie"), "gb_session");
+    const diagnostic = sessionCookie
+      ? "浏览器已发送登录 Cookie，但服务器验证不通过。请检查 Cloudflare 中 BRIDGE_TOKEN 是否在外层 Worker 与 Durable Object 中一致。"
+      : "浏览器没有发送登录 Cookie。请确认使用普通浏览器页面，并检查是否拦截了此网站的 Cookie。";
+    return html(renderTokenForm(sessionWasSet ? diagnostic : ""), 200, false);
   }
   return html(renderLoginApp(), 200, new URL(request.url).protocol === "https:");
 }
@@ -92,16 +97,20 @@ async function loginPage(request: Request, app: BridgeApp): Promise<Response> {
 async function loginSession(request: Request, app: BridgeApp): Promise<Response> {
   const proof = await readProof(request);
   if (!proof || !(await timingSafeEqual(proof, app.config.bridgeToken)) || !app.config.bridgeToken) {
-    return html(renderTokenForm(), 401, false);
+    return html(renderTokenForm("令牌不正确，或服务器收到的令牌为空。请核对 Cloudflare 中的 BRIDGE_TOKEN。"), 401, false);
   }
   const secure = new URL(request.url).protocol === "https:";
-  return new Response(null, {
-    status: 302,
+  // Return the authenticated page in the same response that sets the cookie.
+  // This avoids relying on Safari to persist a cookie across a POST redirect.
+  return new Response(renderLoginApp(), {
+    status: 200,
     headers: {
-      Location: "/login",
+      "Content-Type": "text/html; charset=utf-8",
       "Set-Cookie": sessionCookie(app.config.bridgeToken, secure),
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      ...(secure ? { "Strict-Transport-Security": "max-age=31536000" } : {}),
     },
   });
 }
@@ -525,7 +534,7 @@ function sessionCookie(token: string, secure: boolean): string {
   const parts = [
     `gb_session=${encodeURIComponent(token)}`,
     "HttpOnly",
-    "SameSite=Strict",
+    "SameSite=Lax",
     "Path=/",
     "Max-Age=43200",
   ];
