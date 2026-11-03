@@ -1,5 +1,5 @@
 /** HTML shell that asks for the bridge token. The QR is not on this page. */
-export function renderTokenForm(): string {
+export function renderTokenForm(message = ""): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,6 +17,7 @@ export function renderTokenForm(): string {
 <body>
   <h1>grokbot-weixin</h1>
   <p>Enter the bridge token to open the WeChat QR login. 输入桥接令牌后才会显示微信登录二维码。</p>
+  ${message ? `<p role="alert" style="color:#b42318">${message}</p>` : ""}
   <form method="post" action="/login/session">
     <label for="token">Bridge token</label>
     <input id="token" name="token" type="password" autocomplete="current-password" required>

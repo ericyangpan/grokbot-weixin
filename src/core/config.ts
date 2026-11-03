@@ -41,6 +41,19 @@ export interface BridgeConfig {
   routeTag?: string;
   allowFrom: string[];
   pinFirstSender: boolean;
+  /** OpenAI Chat Completions-compatible endpoint base, without /chat/completions. */
+  aiApiBase: string;
+  aiApiKey: string;
+  aiModel: string;
+  /** Selected provider protocol. */
+  aiApiProtocol: "chat_completions" | "responses";
+  /** Zhongdiwa Responses API credentials. */
+  zhongdiwaApiBase: string;
+  zhongdiwaApiKey: string;
+  zhongdiwaModel: string;
+  zhongdiwaActorAuthorization: string;
+  /** Legacy field retained for existing diagnostics and deployments. */
+  deepseekApiKey: string;
   webhookUrl: string;
   webhookKey: string;
   webhookHeader: string;
@@ -100,6 +113,7 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
     mediaMaxBytes,
     intEnv(env.MEDIA_MAX_TOTAL_BYTES, DEFAULT_MEDIA_TOTAL_BYTES, MIN_MEDIA_MAX_BYTES, MAX_MEDIA_TOTAL_BYTES),
   );
+  const legacyKey = env.DEEPSEEK_API_KEY ?? "";
   return {
     ilinkApiBase: stripSlash(env.ILINK_API_BASE?.trim() || DEFAULT_API_BASE),
     ilinkCdnBase: stripSlash(env.ILINK_CDN_BASE?.trim() || DEFAULT_CDN_BASE),
@@ -111,6 +125,15 @@ export function configFromEnv(env: EnvMap): BridgeConfig {
     ...(route && /^[A-Za-z0-9_.:-]{1,64}$/.test(route) ? { routeTag: route } : {}),
     allowFrom: splitList(env.WEIXIN_ALLOW_FROM),
     pinFirstSender: boolEnv(env.WEIXIN_PIN_FIRST_SENDER, true),
+    aiApiBase: stripSlash(env.AI_API_BASE?.trim() || "https://api.deepseek.com"),
+    aiApiKey: env.AI_API_KEY ?? legacyKey,
+    aiModel: env.AI_MODEL?.trim() || "deepseek-chat",
+    aiApiProtocol: "chat_completions",
+    zhongdiwaApiBase: stripSlash(env.ZHONGDIWA_API_BASE?.trim() || "https://www.zhongdiwa.com/v1"),
+    zhongdiwaApiKey: env.ZHONGDIWA_API_KEY ?? "",
+    zhongdiwaModel: env.ZHONGDIWA_MODEL?.trim() || "gpt-5.5",
+    zhongdiwaActorAuthorization: env.ZHONGDIWA_ACTOR_AUTHORIZATION?.trim() || "local-image-extension",
+    deepseekApiKey: legacyKey,
     webhookUrl: env.GROK_WEBHOOK_URL?.trim() ?? "",
     webhookKey: env.GROK_WEBHOOK_KEY ?? "",
     webhookHeader: env.GROK_WEBHOOK_HEADER?.trim() || "Authorization",
