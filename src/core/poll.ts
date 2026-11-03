@@ -196,9 +196,11 @@ async function handleMessage(
               aiModel: model || app.config.aiModel,
             },
           };
+    if (app.config.sendTyping && msg.context_token) {
+      void sendTypingBestEffort(app, session, sender, msg.context_token);
+    }
     const ok = await replyWithAI(aiApp, event);
     logInfo("inbound_replied", { sender, message_id: event.message_id, type: event.type, provider, ok });
-    if (ok && app.config.sendTyping && msg.context_token) await sendTypingBestEffort(app, session, sender, msg.context_token);
   }
   return { seen: nextSeen, ...(nextTokens !== tokens ? { tokens: nextTokens } : {}) };
 }
@@ -227,11 +229,11 @@ async function handleProviderCommand(app: BridgeApp, event: import("./types.js")
   const key = provider === "deepseek" ? app.config.deepseekApiKey : provider === "zhongdiwa" ? app.config.zhongdiwaApiKey : app.config.aiApiKey;
   if (!key.trim()) {
     const secretName = provider === "deepseek" ? "DEEPSEEK_API_KEY" : provider === "zhongdiwa" ? "ZHONGDIWA_API_KEY" : "AI_API_KEY";
-    await sendCommandReply(app, event, `尚未配置 ${secretName}，暂时不能切换到${providerLabel(provider)}。`);
+    await sendCommandReply(app, event, `尚未配置 ${secretName}，暂时不能切换到 ${providerLabel(provider)}。`);
     return true;
   }
   await app.storage.set(KEYS.aiProvider, provider);
-  await sendCommandReply(app, event, `已切换到${providerLabel(provider)}。\n发送 /model list 查看模型，发送 /model 模型ID 切换模型。`);
+  await sendCommandReply(app, event, `已切换到 ${providerLabel(provider)}。\n发送 /model list 查看模型，发送 /model 模型ID 切换模型。`);
   return true;
 }
 
@@ -273,7 +275,7 @@ async function handleModelCommand(app: BridgeApp, event: import("./types.js").In
         : "没有检测到 AI_API_KEY。请先在 Cloudflare 中配置这个 Secret。";
     } else {
       await app.storage.set(KEYS.aiProvider, provider);
-      reply = `已切换到${providerLabel(provider)}。当前模型：${await readProviderModel(app, provider) || defaultModel(app, provider)}。`;
+      reply = `已切换到 ${providerLabel(provider)}。当前模型：${await readProviderModel(app, provider) || defaultModel(app, provider)}。`;
     }
   } else {
     try {
@@ -283,11 +285,11 @@ async function handleModelCommand(app: BridgeApp, event: import("./types.js").In
         reply = `当前服务商的模型列表中没有找到：${selection}。发送 /model list 查看可用模型。`;
       } else {
         await writeProviderModel(app, provider, model);
-        reply = `已切换到${providerLabel(provider)}模型：${model}。`;
+        reply = `已切换到 ${providerLabel(provider)}模型：${model}。`;
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : "未知错误";
-      reply = `读取${providerLabel(provider)}模型列表失败，无法验证模型名称。\n${detail}`;
+      reply = `读取 ${providerLabel(provider)}模型列表失败，无法验证模型名称。\n${detail}`;
     }
   }
   await sendCommandReply(app, event, reply);

@@ -113,7 +113,7 @@ describe("poll step", () => {
           message({ message_id: "2", from_user_id: "stranger@im.wechat", context_token: "ctx-stranger" }),
           message({ message_id: "3", group_id: "room", from_user_id: "owner@im.wechat" }),
         ],
-      }));
+      })));
     const app = makeApp(mock.fetchImpl, {
       allowFrom: [],
       pinFirstSender: true,
@@ -154,8 +154,11 @@ describe("poll step", () => {
     const payload = JSON.parse(aiCall?.body ?? "{}") as { messages: Array<{ role: string; content: string }> };
     expect(payload.messages.at(-1)?.content).toContain("transcribed");
     expect(mock.calls.some((call) => call.url.pathname.includes("download"))).toBe(false);
-    expect(mock.calls.some((call) => call.url.pathname === "/ilink/bot/getconfig")).toBe(true);
-    expect(mock.calls.some((call) => call.url.pathname === "/ilink/bot/sendtyping")).toBe(true);
+    const typingIndex = mock.calls.findIndex((call) => call.url.pathname === "/ilink/bot/sendtyping");
+    const sendMsgIndex = mock.calls.findIndex((call) => call.url.pathname === "/ilink/bot/sendmessage");
+    expect(typingIndex).toBeGreaterThan(-1);
+    expect(sendMsgIndex).toBeGreaterThan(-1);
+    expect(typingIndex).toBeLessThan(sendMsgIndex);
   });
 
   it("pauses on errcode -14 and does not move the cursor", async () => {
